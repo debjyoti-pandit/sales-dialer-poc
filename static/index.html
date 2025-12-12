@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sales Dialer POC</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+        }
+
+        .container {
+            display: flex;
+            min-height: 100vh;
+        }
+
+        /* Left Panel - Agent Status */
+        .agent-panel {
+            flex: 1;
+            padding: 40px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border-right: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .agent-status {
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 40px;
+            text-align: center;
+            width: 100%;
+            max-width: 400px;
+        }
+
+        .status-indicator {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 12px;
+            vertical-align: middle;
+        }
+
+        .status-indicator.idle { background: #6c757d; }
+        .status-indicator.connecting { background: #f39c12; animation: pulse 1s infinite; }
+        .status-indicator.ready { background: #2ecc71; animation: pulse 2s infinite; }
+        .status-indicator.on-call { background: #3498db; }
+        .status-indicator.error { background: #e74c3c; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.7; transform: scale(1.1); }
+        }
+
+        .status-text {
+            font-size: 1.8rem;
+            font-weight: 600;
+            margin-bottom: 15px;
+        }
+
+        .agent-info {
+            color: rgba(255,255,255,0.6);
+            margin-bottom: 30px;
+            font-size: 1rem;
+        }
+
+        .btn {
+            padding: 18px 50px;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin: 10px;
+            display: inline-block;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-3px);
+            box-shadow: 0 15px 35px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+            color: white;
+        }
+
+        .btn-danger:hover:not(:disabled) {
+            transform: translateY(-3px);
+            box-shadow: 0 15px 35px rgba(231, 76, 60, 0.4);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        /* Right Panel - Campaign Setup */
+        .campaign-panel {
+            flex: 1;
+            padding: 40px;
+            background: rgba(255,255,255,0.02);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .panel-title {
+            font-size: 1.8rem;
+            font-weight: 700;
+            margin-bottom: 25px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        .input-group label {
+            display: block;
+            margin-bottom: 10px;
+            color: rgba(255,255,255,0.8);
+            font-weight: 500;
+            font-size: 1rem;
+        }
+
+        .input-group textarea {
+            width: 100%;
+            min-height: 200px;
+            padding: 15px;
+            border: 2px solid rgba(255,255,255,0.1);
+            border-radius: 12px;
+            background: rgba(255,255,255,0.05);
+            color: #fff;
+            font-size: 1rem;
+            font-family: 'Monaco', 'Menlo', monospace;
+            resize: vertical;
+            transition: border-color 0.3s;
+        }
+
+        .input-group textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .input-group textarea::placeholder {
+            color: rgba(255,255,255,0.3);
+        }
+
+        .input-hint {
+            font-size: 0.85rem;
+            color: rgba(255,255,255,0.5);
+            margin-top: 8px;
+        }
+
+        /* Contact List Display */
+        .contact-list {
+            margin-top: 20px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            padding: 20px;
+            flex: 1;
+            overflow-y: auto;
+            max-height: 300px;
+        }
+
+        .contact-list h3 {
+            margin-bottom: 15px;
+            font-size: 1rem;
+            color: rgba(255,255,255,0.8);
+        }
+
+        .contact-item {
+            display: flex;
+            align-items: center;
+            padding: 12px 15px;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            background: rgba(255,255,255,0.03);
+            transition: all 0.3s;
+        }
+
+        .contact-item.dialing {
+            background: rgba(243, 156, 18, 0.15);
+            border-left: 3px solid #f39c12;
+        }
+
+        .contact-item.ringing {
+            background: rgba(52, 152, 219, 0.15);
+            border-left: 3px solid #3498db;
+        }
+
+        .contact-item.in-progress, .contact-item.answered {
+            background: rgba(46, 204, 113, 0.15);
+            border-left: 3px solid #2ecc71;
+        }
+
+        .contact-item.completed, .contact-item.busy, .contact-item.no-answer, .contact-item.failed {
+            background: rgba(108, 117, 125, 0.15);
+            border-left: 3px solid #6c757d;
+            opacity: 0.7;
+        }
+
+        .contact-number {
+            flex: 1;
+            font-family: monospace;
+            font-size: 1rem;
+        }
+
+        .contact-status {
+            font-size: 0.8rem;
+            padding: 5px 12px;
+            border-radius: 20px;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        .contact-status.pending { background: rgba(108, 117, 125, 0.3); }
+        .contact-status.dialing { background: rgba(243, 156, 18, 0.3); color: #f39c12; }
+        .contact-status.ringing { background: rgba(52, 152, 219, 0.3); color: #3498db; }
+        .contact-status.in-progress, .contact-status.answered { background: rgba(46, 204, 113, 0.3); color: #2ecc71; }
+        .contact-status.completed { background: rgba(108, 117, 125, 0.3); color: #adb5bd; }
+        .contact-status.busy, .contact-status.no-answer, .contact-status.failed { background: rgba(231, 76, 60, 0.3); color: #e74c3c; }
+
+        /* Logs */
+        .logs-section {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 12px;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+
+        .logs-section h3 {
+            margin-bottom: 10px;
+            font-size: 0.9rem;
+            color: rgba(255,255,255,0.6);
+        }
+
+        .log-entry {
+            font-family: monospace;
+            font-size: 0.8rem;
+            padding: 4px 0;
+            color: rgba(255,255,255,0.7);
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+
+        .log-entry.error { color: #e74c3c; }
+        .log-entry.success { color: #2ecc71; }
+        .log-entry.info { color: #3498db; }
+
+        /* Mute button styles */
+        .btn-secondary {
+            background: linear-gradient(135deg, #6c757d 0%, #495057 100%);
+            color: white;
+        }
+        .btn-secondary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(108, 117, 125, 0.4);
+        }
+        .btn-secondary.muted {
+            background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+        }
+
+        /* Modal styles */
+        .modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        .modal-content {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            border-radius: 16px;
+            padding: 30px;
+            width: 90%;
+            max-width: 450px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .modal-content h2 {
+            margin-bottom: 15px;
+            color: #fff;
+        }
+        .modal-content p {
+            color: rgba(255,255,255,0.7);
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: rgba(255,255,255,0.8);
+            font-weight: 500;
+        }
+        .form-group select, .form-group textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid rgba(255,255,255,0.1);
+            border-radius: 8px;
+            background: rgba(255,255,255,0.05);
+            color: #fff;
+            font-size: 1rem;
+        }
+        .form-group select:focus, .form-group textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .form-group textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        .modal-actions .btn {
+            flex: 1;
+            padding: 12px 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Left Panel - Agent Status -->
+        <div class="agent-panel">
+            <div class="agent-status">
+                <div class="status-text">
+                    <span id="statusIndicator" class="status-indicator idle"></span>
+                    <span id="statusText">Idle</span>
+                </div>
+                <p class="agent-info" id="agentInfo">Enter contacts and start campaign to begin</p>
+                
+                <div id="controls">
+                    <button id="startCampaignBtn" class="btn btn-primary" onclick="startCampaign()">
+                        🚀 Start Campaign
+                    </button>
+                    <button id="muteBtn" class="btn btn-secondary" onclick="toggleMute()" style="display: none;">
+                        🎤 Mute
+                    </button>
+                    <button id="endCampaignBtn" class="btn btn-danger" onclick="endCampaign()" style="display: none;">
+                        ✖ End Campaign
+                    </button>
+                </div>
+            </div>
+        </div>
+
+    <!-- Disposition Modal -->
+    <div id="dispositionModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <h2>📝 Call Disposition</h2>
+            <p id="dispositionPhone">Call ended with: +91XXXXXXXXXX</p>
+            
+            <div class="form-group">
+                <label>Disposition:</label>
+                <select id="dispositionSelect">
+                    <option value="interested">✅ Interested</option>
+                    <option value="not_interested">❌ Not Interested</option>
+                    <option value="callback">📅 Callback Later</option>
+                    <option value="wrong_number">🚫 Wrong Number</option>
+                    <option value="no_answer">📵 No Answer</option>
+                    <option value="voicemail">📧 Voicemail</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label>Notes:</label>
+                <textarea id="dispositionNotes" placeholder="Add notes about the call..."></textarea>
+            </div>
+            
+            <div class="modal-actions">
+                <button class="btn btn-primary" onclick="submitDisposition(true)">
+                    Submit & Call Next
+                </button>
+                <button class="btn btn-secondary" onclick="submitDisposition(false)">
+                    Submit & Stop
+                </button>
+            </div>
+        </div>
+    </div>
+
+        <!-- Right Panel - Campaign Setup -->
+        <div class="campaign-panel">
+            <h1 class="panel-title">📞 Sales Dialer</h1>
+            
+            <div class="input-group">
+                <label for="contactsInput">Enter Contacts (Phone Numbers)</label>
+                <textarea 
+                    id="contactsInput" 
+                    placeholder="+1234567890&#10;+0987654321&#10;+1122334455&#10;...enter one number per line"
+                ></textarea>
+                <p class="input-hint">Enter phone numbers with country code, one per line. All contacts will be dialed simultaneously.</p>
+            </div>
+
+            <!-- Contact List -->
+            <div id="contactListContainer" class="contact-list" style="display: none;">
+                <h3>📋 Campaign Contacts (<span id="contactCount">0</span>)</h3>
+                <div id="contactList"></div>
+            </div>
+
+            <!-- Logs -->
+            <div class="logs-section">
+                <h3>📝 Activity Log</h3>
+                <div id="logContainer"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/twilio.min.js?v=2"></script>
+    <script src="/static/js/app.js?v=2"></script>
+    <script>
+        // Fallback if app.js didn't load
+        if (typeof window.startCampaign !== 'function') {
+            console.error('app.js failed to load!');
+            document.getElementById('logContainer').innerHTML = '<div class="log-entry error">Error: app.js failed to load. Try Ctrl+Shift+R to hard refresh.</div>';
+        }
+    </script>
+</body>
+</html>
