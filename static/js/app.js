@@ -202,7 +202,10 @@ function handleWebSocketMessage(data) {
         case 'call_ended':
             // Customer disconnected after being connected - show disposition modal
             log(`Call with ${data.phone} ended`, 'info');
+            currentConnectedPhone = null;  // Clear connected phone
             if (muteBtn) muteBtn.style.display = 'none';
+            updateStatus('ready', 'Call ended. Ready for next call.');
+            updateContactStatus(data.contact_status);  // Update status from backend
             showDispositionModal(data.phone);
             break;
             
@@ -433,16 +436,31 @@ function updateContactStatus(contactStatus) {
             statusEl.textContent = formatStatus(status);
         }
         
+        // Only count as connected if status is actually 'in-progress'
+        // Don't show "Speaking with" if call has ended
         if (status === 'in-progress') {
             connectedCount++;
             connectedPhone = phone;
+            currentConnectedPhone = phone;  // Track current connected phone
         }
         if (status === 'ringing') ringingCount++;
-        if (status === 'dialing' || status === 'initiated') dialingCount++;
+        if (status === 'dialing' || status === 'initiated' || status === 'queued') dialingCount++;
     });
     
-    if (connectedCount > 0) {
+    // Only show "Speaking with" if there's actually a connected call
+    // and we're not in the middle of showing a disposition modal
+    if (connectedCount > 0 && currentConnectedPhone === connectedPhone) {
         updateStatus('connected', `🎉 Speaking with ${connectedPhone}`);
+    } else if (connectedCount === 0 && currentConnectedPhone) {
+        // Call ended - clear the status
+        currentConnectedPhone = null;
+        if (ringingCount > 0) {
+            updateStatus('ready', `📞 ${ringingCount} lead(s) ringing...`);
+        } else if (dialingCount > 0) {
+            updateStatus('ready', `📱 Dialing ${dialingCount} lead(s)...`);
+        } else {
+            updateStatus('ready', 'Waiting for leads to connect...');
+        }
     } else if (ringingCount > 0) {
         updateStatus('ready', `📞 ${ringingCount} lead(s) ringing...`);
     } else if (dialingCount > 0) {
