@@ -1,6 +1,7 @@
 """WebSocket routes"""
 from fastapi import WebSocket, WebSocketDisconnect
 from app.storage import active_websockets, agents, campaigns
+from app.logger import logger
 
 
 async def websocket_endpoint(websocket: WebSocket, agent_name: str):
@@ -10,7 +11,7 @@ async def websocket_endpoint(websocket: WebSocket, agent_name: str):
     # Store websocket for this agent
     active_websockets[agent_name] = websocket
     
-    print(f"WebSocket connected for agent {agent_name}")
+    logger.agent(agent_name, "WebSocket connected")
     
     try:
         # Send current agent state if exists
@@ -33,10 +34,10 @@ async def websocket_endpoint(websocket: WebSocket, agent_name: str):
         while True:
             data = await websocket.receive_text()
             # Handle any client messages if needed
-            print(f"Received from agent {agent_name}: {data}")
+            logger.agent(agent_name, f"Received: {data}")
             
     except WebSocketDisconnect:
-        print(f"WebSocket disconnected for agent {agent_name}")
+        logger.agent(agent_name, "WebSocket disconnected")
         if agent_name in active_websockets:
             del active_websockets[agent_name]
 

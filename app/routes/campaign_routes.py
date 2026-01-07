@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Query
 from app.models.campaign import DispositionData
 from app.services.campaign_service import campaign_service
 from app.services.twilio_service import twilio_service
+from app.logger import logger
 
 router = APIRouter(prefix="/api", tags=["campaign"])
 
@@ -42,7 +43,7 @@ async def save_disposition(campaign_id: str, data: DispositionData):
     if result is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
     
-    print(f"Disposition saved for {data.phone}: {data.disposition}")
+    logger.success(f"Disposition saved for {data.phone}: {data.disposition}")
     
     return {"status": "saved", "phone": data.phone, "disposition": data.disposition}
 
@@ -50,12 +51,17 @@ async def save_disposition(campaign_id: str, data: DispositionData):
 @router.post("/agent/{agent_name}/dial-next-batch")
 async def dial_next_batch(agent_name: str):
     """Dial the next batch of undialed contacts for an agent"""
-    dialed_phones = campaign_service.dial_next_batch(agent_name)
-    
-    if dialed_phones:
-        return {"status": "dialing", "phones": dialed_phones, "count": len(dialed_phones)}
+    result = campaign_service.dial_next_batch(agent_name)
+
+    if result["phones"]:
+        return {
+            "status": "dialing",
+            "phones": result["phones"],
+            "count": len(result["phones"]),
+            "next_batch": result["next_batch"]
+        }
     else:
-        return {"status": "no_more_contacts", "phones": []}
+        return {"status": "no_more_contacts", "phones": [], "next_batch": []}
 
 
 @router.post("/agent/{agent_name}/end")

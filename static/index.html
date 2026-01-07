@@ -221,6 +221,12 @@
             opacity: 0.7;
         }
 
+        .contact-item.next-batch {
+            background: rgba(52, 152, 219, 0.1);
+            border-left: 3px solid #3498db;
+            opacity: 0.8;
+        }
+
         .contact-number {
             flex: 1;
             font-family: monospace;
@@ -445,6 +451,12 @@
             <div id="contactListContainer" class="contact-list" style="display: none;">
                 <h3>📋 Campaign Contacts (<span id="contactCount">0</span>)</h3>
                 <div id="contactList"></div>
+            </div>
+
+            <!-- Next Batch Preview -->
+            <div id="nextBatchContainer" class="contact-list" style="display: none;">
+                <h3>🔜 Next Batch (<span id="nextBatchCount">0</span> contacts)</h3>
+                <div id="nextBatchList"></div>
             </div>
 
             <!-- Logs -->

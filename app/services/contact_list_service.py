@@ -1,7 +1,7 @@
 """Service for managing shared contact list from file"""
-import os
 from typing import List, Set
 from pathlib import Path
+from app.logger import logger
 
 
 class ContactListService:
@@ -19,7 +19,7 @@ class ContactListService:
         
         # Check if file exists
         if not file_path.exists():
-            print(f"Contact file {self.contact_file_path} not found. Creating empty file.")
+            logger.warning(f"Contact file {self.contact_file_path} not found. Creating empty file.")
             file_path.touch()
             return []
         
@@ -45,16 +45,46 @@ class ContactListService:
                             line = '+' + line
                         contacts.append(line)
             self._contacts_cache = contacts
-            print(f"Loaded {len(contacts)} contacts from {self.contact_file_path}")
+            logger.success(f"Loaded {len(contacts)} contacts from {self.contact_file_path}")
         except Exception as e:
-            print(f"Error loading contacts from file: {e}")
+            logger.error(f"Error loading contacts from file: {e}")
             self._contacts_cache = []
     
     def get_undialed_contacts(self, dialed_contacts: Set[str], count: int = 5) -> List[str]:
-        """Get contacts that haven't been dialed by any agent"""
+        """Get contacts that haven't been dialed by any agent, recycling when all are dialed"""
         all_contacts = self.get_contacts()
+
+        if not all_contacts:
+            return []
+
+        # Get undialed contacts
         undialed = [phone for phone in all_contacts if phone not in dialed_contacts]
-        return undialed[:count]
+
+        # If we have enough undialed contacts, return them
+        if len(undialed) >= count:
+            return undialed[:count]
+
+        # If we don't have enough undialed contacts, recycle from the beginning
+        result = undialed.copy()  # Start with all undialed contacts
+
+        # Add additional contacts from the beginning to make up the batch size
+        needed = count - len(undialed)
+        for phone in all_contacts:
+            if len(result) >= count:
+                break
+            if phone not in result:  # Don't add duplicates
+                result.append(phone)
+
+        return result
+
+    def get_next_batch_preview(self, dialed_contacts: Set[str], current_batch: List[str], count: int = 5) -> List[str]:
+        """Get preview of next batch of contacts that will be dialed after current batch"""
+        # Create a temporary set that includes the current batch as "dialed"
+        # so we can see what would be dialed next
+        temp_dialed = dialed_contacts.copy()
+        temp_dialed.update(current_batch)
+
+        return self.get_undialed_contacts(temp_dialed, count)
 
 
 # Singleton instance

@@ -13,8 +13,8 @@ from app.config import (
     TWILIO_TWIML_APP_SID,
     TWILIO_PHONE_NUMBER,
     BASE_URL,
-    CONFERENCE_NAME,
 )
+from app.logger import logger
 
 
 class TwilioService:
@@ -49,10 +49,10 @@ class TwilioService:
 
     def dial_contact(self, phone_number: str, campaign_id: str, agent_name: str = None):
         """Dial a single contact"""
-        print(f"Dialing contact {phone_number} for campaign {campaign_id} (agent: {agent_name})")
+        logger.call(phone_number, f"Dialing contact for campaign {campaign_id} (agent: {agent_name})")
 
         if not self.client:
-            print(f"Twilio client not configured, skipping {phone_number}")
+            logger.error(f"Twilio client not configured, skipping {phone_number}")
             return None
 
         # URL-encode the phone number to handle + sign
@@ -72,10 +72,10 @@ class TwilioService:
                 async_amd_status_callback=f"{BASE_URL}/api/voice/amd-status?campaign_id={campaign_id}&phone={encoded_phone}&agent_name={encoded_agent}",
                 async_amd_status_callback_method="POST",
             )
-            print(f"Call initiated to {phone_number}: {call.sid}")
+            logger.success(f"Call initiated to {phone_number}: {call.sid}")
             return call.sid
         except Exception as e:
-            print(f"Error dialing {phone_number}: {e}")
+            logger.error(f"Error dialing {phone_number}: {e}")
             return None
 
     def hangup_call(self, call_sid: str):
@@ -84,10 +84,10 @@ class TwilioService:
             return False
         try:
             self.client.calls(call_sid).update(status="completed")
-            print(f"Hung up call {call_sid}")
+            logger.info(f"Hung up call {call_sid}")
             return True
         except Exception as e:
-            print(f"Error hanging up call {call_sid}: {e}")
+            logger.error(f"Error hanging up call {call_sid}: {e}")
             return False
 
     def dequeue_call(self, queue_name: str, call_sid: str, dequeue_url: str):
@@ -104,7 +104,7 @@ class TwilioService:
                     break
             
             if not queue:
-                print(f"Queue {queue_name} not found")
+                logger.warning(f"Queue {queue_name} not found")
                 return False
             
             # Get the member (call) from the queue
@@ -117,17 +117,53 @@ class TwilioService:
                     break
             
             if not member:
-                print(f"Call {call_sid} not found in queue {queue_name}")
+                logger.warning(f"Call {call_sid} not found in queue {queue_name}")
                 return False
-            
+
             # Dequeue the call and redirect to the specified URL
             member.update(url=dequeue_url, method="POST")
-            print(f"Dequeued call {call_sid} from queue {queue_name} and redirected to {dequeue_url}")
+            logger.success(f"Dequeued call {call_sid} from queue {queue_name} and redirected to {dequeue_url}")
             return True
         except Exception as e:
-            print(f"Error dequeuing call {call_sid} from queue {queue_name}: {e}")
+            logger.error(f"Error dequeuing call {call_sid} from queue {queue_name}: {e}")
             return False
     
+
+    def dial_contact_to_queue(self, phone_number: str, campaign_id: str, agent_name: str):
+        """Dial a contact and put them directly in the global wait queue"""
+        logger.call(phone_number, f"Dialing contact for campaign {campaign_id} to wait queue")
+
+        if not self.client:
+            logger.error(f"Twilio client not configured, skipping {phone_number}")
+            return None
+
+        # URL-encode parameters
+        encoded_phone = quote(phone_number, safe="")
+        encoded_campaign = quote(campaign_id, safe="")
+        encoded_agent = quote(agent_name or "", safe="")
+
+        try:
+            # Create TwiML URL that puts contact directly in global wait queue
+            queue_url = f"{BASE_URL}/api/voice/contact-to-queue?campaign_id={encoded_campaign}&phone={encoded_phone}&agent_name={encoded_agent}"
+
+            call = self.client.calls.create(
+                to=phone_number,
+                from_=TWILIO_PHONE_NUMBER,
+                url=queue_url,
+                status_callback=f"{BASE_URL}/api/voice/status?campaign_id={encoded_campaign}&phone={encoded_phone}&agent_name={encoded_agent}",
+                status_callback_event=["initiated", "ringing", "answered", "completed"],
+                status_callback_method="POST",
+                machine_detection="Enable",
+                async_amd="true",
+                async_amd_status_callback=f"{BASE_URL}/api/voice/amd-status?campaign_id={encoded_campaign}&phone={encoded_phone}&agent_name={encoded_agent}",
+                async_amd_status_callback_method="POST",
+            )
+            logger.success(f"Call initiated to {phone_number}: {call.sid}")
+            return call.sid
+        except Exception as e:
+            logger.error(f"Error dialing {phone_number}: {e}")
+            return None
+
     def dial_agent_device(self, agent_identity: str, customer_call_sid: str):
         """Dial the agent's device and connect it to the customer call"""
         if not self.client:
@@ -137,16 +173,16 @@ class TwilioService:
             encoded_identity = quote(agent_identity, safe="")
             encoded_call_sid = quote(customer_call_sid, safe="")
             dial_url = f"{BASE_URL}/api/voice/connect-agent?agent_identity={encoded_identity}&customer_call_sid={encoded_call_sid}"
-            
+
             # Update the customer call to dial the agent
             self.client.calls(customer_call_sid).update(
                 url=dial_url,
                 method="POST"
             )
-            print(f"Dialing agent {agent_identity} for call {customer_call_sid}")
+            logger.agent(agent_identity, f"Dialing agent for call {customer_call_sid}")
             return True
         except Exception as e:
-            print(f"Error dialing agent device: {e}")
+            logger.error(f"Error dialing agent device: {e}")
             return False
 
 

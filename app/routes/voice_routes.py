@@ -7,6 +7,8 @@ from app.services.campaign_service import campaign_service
 from app.services.call_queue_service import call_queue_service
 from app.services.twilio_service import twilio_service
 from app.websocket.manager import broadcast_to_agent
+from app.storage import agents
+from app.logger import logger
 from urllib.parse import quote
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
@@ -62,7 +64,7 @@ async def voice_customer_queue(request: Request, campaign_id: str = None, phone:
         if campaign:
             agent_name = campaign.get("agent_name")
     
-    print(f"Call answered: {phone} (SID: {call_sid}) - Enqueuing in Twilio queue for agent {agent_name}")
+    logger.call(phone, f"Call answered - enqueuing for agent {agent_name}")
     
     # Add call to our internal queue tracking
     if agent_name and phone and call_sid:
@@ -119,7 +121,7 @@ async def queue_action(request: Request, campaign_id: str = None, phone: str = N
     queue_time = form_data.get("QueueTime", "0")
     call_sid = form_data.get("CallSid", "")
     
-    print(f"Call {call_sid} left queue. Reason: {dequeue_reason}, Queue time: {queue_time}s")
+    logger.info(f"Call {call_sid} left queue. Reason: {dequeue_reason}, Queue time: {queue_time}s")
     
     # Get agent_name from campaign if not provided
     if not agent_name and campaign_id:
@@ -175,7 +177,7 @@ async def voice_amd_status(request: Request, campaign_id: str = None, phone: str
         "Timestamp": form_data.get("Timestamp", "")
     }
 
-    print(f"AMD result for {phone} (SID: {call_sid}): {answered_by} - {machine_detection_status}")
+    logger.call(phone, f"AMD result: {answered_by} - {machine_detection_status}")
 
     # Process detection result
     if campaign_id and phone and call_sid and agent_name:
@@ -206,7 +208,7 @@ async def voice_status(request: Request, campaign_id: str = None, phone: str = N
         if campaign:
             agent_name = campaign.get("agent_name")
     
-    print(f"Call status for {phone}: {call_status} (SID: {call_sid})")
+    logger.call(phone, f"Status: {call_status}")
     
     if campaign_id and phone and agent_name:
         campaign_service.update_call_status(campaign_id, phone, call_status, call_sid)
@@ -258,6 +260,46 @@ async def voice_status(request: Request, campaign_id: str = None, phone: str = N
     return JSONResponse(content={"status": "ok"})
 
 
+@router.post("/contact-to-queue")
+async def contact_to_queue(request: Request, campaign_id: str = None, phone: str = None, queue_name: str = None, agent_name: str = None):
+    """TwiML endpoint for contact to join the global wait queue after answering"""
+    response = VoiceResponse()
+
+    # Normalize phone number
+    if phone:
+        phone = phone.strip()
+        if not phone.startswith('+'):
+            phone = '+' + phone
+
+    # Get call SID from request
+    form_data = await request.form()
+    call_sid = form_data.get("CallSid", "")
+
+    logger.call(phone, f"Contact joining wait queue")
+
+    # Update campaign status
+    if campaign_id and phone and call_sid:
+        campaign_service.update_call_status(campaign_id, phone, "queued", call_sid)
+
+        # Broadcast queue update to agent
+        await broadcast_to_agent(agent_name or "unknown", {
+            "type": "call_queued",
+            "phone": phone,
+            "call_sid": call_sid,
+            "queue_name": "wait"  # Always use the global wait queue
+        })
+
+    # Put contact in the global wait queue
+    enqueue = Enqueue(
+        wait_url=QUEUE_HOLD_MUSIC_URL,
+        wait_url_method="GET"
+    )
+    enqueue.append("wait")  # Global wait queue
+    response.append(enqueue)
+
+    return create_twiml_response(response)
+
+
 @router.post("/connect-agent")
 async def connect_agent(request: Request, agent_identity: str = None, customer_call_sid: str = None):
     """TwiML endpoint to connect a customer call to an agent's device"""
@@ -272,7 +314,7 @@ async def connect_agent(request: Request, agent_identity: str = None, customer_c
     dial.client(agent_identity)  # Dial the agent's Twilio client
     response.append(dial)
     
-    print(f"Connecting call {customer_call_sid} to agent {agent_identity}")
+    logger.agent(agent_identity, f"Connecting call {customer_call_sid} to agent")
     
     return create_twiml_response(response)
 
@@ -286,11 +328,15 @@ async def voice_dial(request: Request):
     response = VoiceResponse()
 
     if to.startswith("queue:"):
-        # Connect to agent's queue
-        queue_name = to.replace("queue:", "")
+        # Connect to the global wait queue (ignore the specific queue name)
         dial = Dial()
-        dial.queue(queue_name)  # Connect to queue
+        dial.queue("wait")  # Always connect to global wait queue
         response.append(dial)
+    elif to.startswith("wait:"):
+        # Agent is waiting - play hold music until connected
+        campaign_id = to.replace("wait:", "")
+        response.say("Waiting for customer calls. You will be connected automatically.")
+        response.play(QUEUE_HOLD_MUSIC_URL, loop=0)
     elif to:
         dial = Dial(caller_id=TWILIO_PHONE_NUMBER)
         dial.number(to)

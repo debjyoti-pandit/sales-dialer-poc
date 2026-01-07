@@ -3,7 +3,6 @@ import uuid
 from typing import Optional
 from app.storage import campaigns, agents, dialed_contacts
 from app.services.twilio_service import twilio_service
-from app.services.call_queue_service import call_queue_service
 from app.services.contact_list_service import contact_list_service
 from app.config import BATCH_DIAL_COUNT
 from concurrent.futures import ThreadPoolExecutor
@@ -16,16 +15,18 @@ class CampaignService:
     """Service for managing campaigns"""
 
     def start_agent_campaign(self, agent_name: str, identity: str, batch_size: int = BATCH_DIAL_COUNT) -> dict:
-        """Start a campaign for an agent - add to queue and dial batch of contacts"""
+        """Start a campaign for an agent - connect agent to queue first, then dial contacts"""
         campaign_id = uuid.uuid4().hex[:8]
+        queue_name = f"campaign_{campaign_id}"
 
         # Create or update agent
         agent = {
             "name": agent_name,
             "campaign_id": campaign_id,
-            "status": "active",
+            "status": "waiting_in_queue",
             "identity": identity,
             "connected_phone": None,
+            "queue_name": queue_name,
         }
         agents[agent_name] = agent
 
@@ -46,8 +47,13 @@ class CampaignService:
                 "call_sids": {},
                 "dispositions": {},
                 "status": "no_contacts",
-                "message": "No more contacts to dial"
+                "message": "No more contacts to dial",
+                "next_batch": [],
+                "queue_name": queue_name
             }
+
+        # Get preview of next batch
+        next_batch_preview = contact_list_service.get_next_batch_preview(all_dialed, undialed_contacts, batch_size)
 
         # Create campaign
         campaign = {
@@ -57,9 +63,11 @@ class CampaignService:
             "contact_status": {phone: "pending" for phone in undialed_contacts},
             "call_sids": {},
             "dispositions": {},
-            "status": "dialing",
+            "status": "agent_in_queue",
             "agent_identity": identity,
             "connected_phone": None,
+            "next_batch": next_batch_preview,
+            "queue_name": queue_name,
         }
 
         campaigns[campaign_id] = campaign
@@ -70,16 +78,19 @@ class CampaignService:
                 dialed_contacts[phone] = set()
             dialed_contacts[phone].add(agent_name)
 
-        # Batch dial contacts
-        loop = asyncio.get_event_loop()
-        for phone in undialed_contacts:
-            campaign["contact_status"][phone] = "dialing"
-            def dial_and_store(phone_num=phone):
-                call_sid = twilio_service.dial_contact(phone_num, campaign_id, agent_name)
-                if call_sid:
-                    campaign["call_sids"][phone_num] = call_sid
+        # Agent will connect to queue directly via device.connect() in the frontend
+        # No backend action needed - the TwiML app will handle queue connection
 
-            loop.run_in_executor(executor, dial_and_store)
+        # Dial contacts immediately (agent should connect to queue at the same time)
+        loop = asyncio.get_event_loop()
+        def dial_contacts():
+            for phone in undialed_contacts:
+                campaign["contact_status"][phone] = "dialing"
+                call_sid = twilio_service.dial_contact_to_queue(phone, campaign_id, agent_name)
+                if call_sid:
+                    campaign["call_sids"][phone] = call_sid
+
+        loop.run_in_executor(executor, dial_contacts)
 
         return campaign
 
@@ -115,16 +126,16 @@ class CampaignService:
 
         return campaign["dispositions"][phone]
 
-    def dial_next_batch(self, agent_name: str, batch_size: int = BATCH_DIAL_COUNT) -> list[str]:
+    def dial_next_batch(self, agent_name: str, batch_size: int = BATCH_DIAL_COUNT) -> dict:
         """Dial next batch of undialed contacts for an agent"""
         if agent_name not in agents:
-            return []
+            return {"phones": [], "next_batch": []}
 
         agent = agents[agent_name]
         campaign_id = agent.get("campaign_id")
-        
+
         if not campaign_id or campaign_id not in campaigns:
-            return []
+            return {"phones": [], "next_batch": []}
 
         campaign = campaigns[campaign_id]
 
@@ -137,14 +148,20 @@ class CampaignService:
         undialed_contacts = contact_list_service.get_undialed_contacts(all_dialed, batch_size)
 
         if not undialed_contacts:
-            return []
+            return {"phones": [], "next_batch": []}
+
+        # Get preview of next batch (after this one is dialed)
+        next_batch_preview = contact_list_service.get_next_batch_preview(all_dialed, undialed_contacts, batch_size)
+
+        # Update campaign with next batch preview
+        campaign["next_batch"] = next_batch_preview
 
         # Add new contacts to campaign
         for phone in undialed_contacts:
             if phone not in campaign["contacts"]:
                 campaign["contacts"].append(phone)
             campaign["contact_status"][phone] = "dialing"
-            
+
             # Mark as dialed by this agent
             if phone not in dialed_contacts:
                 dialed_contacts[phone] = set()
@@ -162,7 +179,7 @@ class CampaignService:
 
             loop.run_in_executor(executor, dial_and_store)
 
-        return dialed_phones
+        return {"phones": dialed_phones, "next_batch": next_batch_preview}
 
     def end_campaign(self, campaign_id: str):
         """End campaign and hang up all calls"""

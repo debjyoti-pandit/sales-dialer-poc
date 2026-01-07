@@ -5,11 +5,13 @@ A proof-of-concept sales dialer application using Twilio Voice SDK and FastAPI.
 ## Features
 
 - Browser-based softphone using Twilio Client JS SDK
-- Multi-agent support with individual queues
-- Shared contact list from text file
+- Campaign-based queue system (one queue per campaign)
+- Shared contact list from text file with automatic recycling
 - Batch dialing with duplicate prevention across agents
-- Queue-based call connection (no conference required)
+- Agents hear hold music while waiting in campaign queue
+- Automatic agent-customer connection via Twilio queues
 - Answering machine detection and voicemail filtering
+- Real-time status updates via WebSocket
 
 ## Setup
 
@@ -86,10 +88,11 @@ Open http://localhost:8000 in your browser.
 ## Usage
 
 1. **Enter Agent Name** - Enter your name when prompted to identify yourself in the system
-2. **Start Campaign** - The system will automatically dial a batch of contacts from the shared contact list (`contacts.txt`)
-3. **Handle Calls** - When customers answer, you'll receive incoming calls on your device
-4. **Call Next Batch** - After completing calls, dial the next batch of undialed contacts
-5. **End Campaign** - Stop dialing and hang up all active calls
+2. **Start Campaign** - Your device connects directly to the campaign queue where you'll hear hold music
+3. **Receive Calls** - Customers who answer are automatically connected to you through the queue
+4. **Handle Calls** - Bridge established automatically - just talk to the connected customer
+5. **Call Next Batch** - Request additional contacts to be dialed from the shared list
+6. **End Campaign** - Disconnect from queue and terminate all calls
 
 ## Architecture
 
@@ -98,18 +101,20 @@ Open http://localhost:8000 in your browser.
 │   Agent Browser │────▶│   FastAPI       │────▶│   Twilio        │
 │   (Twilio SDK)  │◀────│   Backend       │◀────│   Voice API     │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
-                      │
-                      ▼
-               ┌─────────────────┐
-               │  Contact List   │
-               │  (contacts.txt) │
-               └─────────────────┘
+                      │                        │
+                      ▼                        ▼
+               ┌─────────────────┐     ┌─────────────────┐
+               │  Contact List   │     │  Campaign      │
+               │  (contacts.txt) │     │  Queue         │
+               └─────────────────┘     └─────────────────┘
 ```
 
-- **Contact List**: Shared text file with phone numbers
-- **Agent Registration**: Each agent gets a unique identity and WebSocket connection
-- **Batch Dialing**: Agents dial batches of contacts that haven't been dialed by others
-- **Queue Management**: Answered calls are queued and connected directly to agents
+- **Contact List**: Shared text file with phone numbers (auto-recycles when exhausted)
+- **Global Wait Queue**: Single Twilio queue for all agents and customers
+- **Agent Flow**: Agent connects to waiting state → hears hold music → gets connected when customers join queue
+- **Customer Flow**: Contacts dialed → answer → AMD check → join global wait queue → connect to available agent
+- **Simple Architecture**: One queue handles all call distribution automatically
+- **Batch Dialing**: Configurable batch sizes with duplicate prevention
 - **Real-time Updates**: WebSocket connections provide live status updates
 
 ## API Endpoints

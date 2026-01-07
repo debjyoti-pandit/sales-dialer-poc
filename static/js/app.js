@@ -155,9 +155,16 @@ async function dialNextBatch() {
             const data = await response.json();
             if (data.phones && data.phones.length > 0) {
                 log(`Calling ${data.count} contacts...`, 'success');
+                // Update next batch preview
+                if (campaign && data.next_batch) {
+                    campaign.next_batch = data.next_batch;
+                    displayNextBatch(data.next_batch);
+                }
             } else {
                 log('No more contacts to dial', 'info');
                 updateStatus('idle', 'All contacts have been called');
+                // Hide next batch when no more contacts
+                displayNextBatch([]);
             }
         }
     } catch (error) {
@@ -222,6 +229,16 @@ function handleWebSocketMessage(data) {
             updateContactStatus(data.campaign.contact_status);
             // Show mute button when on call
             if (muteBtn) muteBtn.style.display = 'inline-block';
+            break;
+
+        case 'customer_ready':
+            // Customer is ready - hang up waiting call and connect to actual queue
+            log(`📞 Customer ${data.phone} ready - connecting...`, 'success');
+            if (currentCall) {
+                currentCall.disconnect();
+            }
+            // Connect to the actual queue where customer is waiting
+            setTimeout(() => connectToCampaignQueue(data.queue_name), 500);
             break;
             
         case 'call_ended':
@@ -295,9 +312,9 @@ window.startCampaign = async function() {
         // Initialize Twilio Device
         await initializeDevice(token);
 
-        // Agent connects to queue
-        log('Connecting to queue...');
-        await connectToQueue(agentName);
+        // Connect agent to waiting state (will hear hold music until connected)
+        log('Connecting to dialer - waiting for calls...');
+        await connectToWaitingState(campaign.id);
 
         // Show/hide buttons
         startCampaignBtn.style.display = 'none';
@@ -347,11 +364,7 @@ function setupDeviceHandlers() {
         console.error('Twilio Device Error:', error);
     });
 
-    device.on('incoming', function(call) {
-        log('Incoming call from queue...');
-        setupCallHandlers(call);
-        call.accept();
-    });
+    // No incoming calls - agents connect outbound to queue
 
     device.on('tokenWillExpire', async function() {
         log('Token expiring, refreshing...');
@@ -396,27 +409,73 @@ function setupCallHandlers(call) {
     });
 }
 
-async function connectToQueue(agentName) {
-    // Connect to agent's queue - Twilio will call the device when a call is dequeued
-    // The device will receive an incoming call which we handle in setupDeviceHandlers
-    log('Ready to receive calls from queue', 'success');
-    updateStatus('ready', 'Waiting for calls from queue...');
+async function connectToWaitingState(campaignId) {
+    // Connect agent to waiting state - will hear hold music until connected to a customer
+    const call = await device.connect({
+        params: {
+            To: `wait:${campaignId}`
+        }
+    });
+
+    setupCallHandlers(call);
+    log('Connected to dialer - waiting for customer calls...', 'success');
+    updateStatus('ready', 'Waiting for customer calls...');
+}
+
+async function connectToCampaignQueue(queueName) {
+    // Connect agent directly to campaign queue where customer is waiting
+    const call = await device.connect({
+        params: {
+            To: `queue:${queueName}`
+        }
+    });
+
+    setupCallHandlers(call);
+    log('Connected to customer!', 'success');
+    updateStatus('connected', 'On call with customer');
+    // Show mute button when on call
+    if (muteBtn) muteBtn.style.display = 'inline-block';
 }
 
 // ============== UI Updates ==============
 
 function displayContacts(campaignData) {
     if (!contactListContainer || !contactList || !contactCount) return;
-    
+
     contactListContainer.style.display = 'block';
     contactCount.textContent = campaignData.contacts.length;
-    
+
     contactList.innerHTML = campaignData.contacts.map((contact, index) => `
         <div class="contact-item" id="contact-${index}" data-phone="${contact}">
             <span class="contact-number">${contact}</span>
             <span class="contact-status pending" id="status-${index}">Pending</span>
         </div>
     `).join('');
+
+    // Display next batch preview if available
+    displayNextBatch(campaignData.next_batch || []);
+}
+
+function displayNextBatch(nextBatchContacts) {
+    const nextBatchContainer = document.getElementById('nextBatchContainer');
+    const nextBatchList = document.getElementById('nextBatchList');
+    const nextBatchCount = document.getElementById('nextBatchCount');
+
+    if (!nextBatchContainer || !nextBatchList || !nextBatchCount) return;
+
+    if (nextBatchContacts && nextBatchContacts.length > 0) {
+        nextBatchContainer.style.display = 'block';
+        nextBatchCount.textContent = nextBatchContacts.length;
+
+        nextBatchList.innerHTML = nextBatchContacts.map((contact, index) => `
+            <div class="contact-item next-batch">
+                <span class="contact-number">${contact}</span>
+                <span class="contact-status" style="background: rgba(52, 152, 219, 0.3); color: #3498db;">Up Next</span>
+            </div>
+        `).join('');
+    } else {
+        nextBatchContainer.style.display = 'none';
+    }
 }
 
 function updateContactStatus(contactStatus) {
