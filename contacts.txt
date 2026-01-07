@@ -1,0 +1,8 @@
+# Shared Contact List
+# Add phone numbers here, one per line
+# Format: +[country code][number]
+# Example: +1234567890
+
++918436476635
++918617020252
+

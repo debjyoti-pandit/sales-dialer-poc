@@ -358,7 +358,8 @@
                     <span id="statusIndicator" class="status-indicator idle"></span>
                     <span id="statusText">Idle</span>
                 </div>
-                <p class="agent-info" id="agentInfo">Enter contacts and start campaign to begin</p>
+                <p class="agent-info" id="agentInfo">Enter your name to begin</p>
+                <p class="agent-info" id="agentNameDisplay" style="font-weight: 600; color: #667eea; margin-top: 10px;"></p>
                 
                 <div id="controls">
                     <button id="startCampaignBtn" class="btn btn-primary" onclick="startCampaign()">
@@ -373,6 +374,25 @@
                 </div>
             </div>
         </div>
+
+    <!-- Agent Name Modal -->
+    <div id="agentNameModal" class="modal" style="display: flex;">
+        <div class="modal-content">
+            <h2>👤 Enter Your Name</h2>
+            <p>Please enter your name to start using the dialer.</p>
+            
+            <div class="form-group">
+                <label>Agent Name:</label>
+                <input type="text" id="agentNameInput" placeholder="Enter your name" style="width: 100%; padding: 12px; border: 2px solid rgba(255,255,255,0.1); border-radius: 8px; background: rgba(255,255,255,0.05); color: #fff; font-size: 1rem;" />
+            </div>
+            
+            <div class="modal-actions">
+                <button class="btn btn-primary" onclick="setAgentName()" style="flex: 1;">
+                    Start
+                </button>
+            </div>
+        </div>
+    </div>
 
     <!-- Disposition Modal -->
     <div id="dispositionModal" class="modal" style="display: none;">
@@ -413,12 +433,12 @@
             <h1 class="panel-title">📞 Sales Dialer</h1>
             
             <div class="input-group">
-                <label for="contactsInput">Enter Contacts (Phone Numbers)</label>
-                <textarea 
-                    id="contactsInput" 
-                    placeholder="+1234567890&#10;+0987654321&#10;+1122334455&#10;...enter one number per line"
-                ></textarea>
-                <p class="input-hint">Enter phone numbers with country code, one per line. All contacts will be dialed simultaneously.</p>
+                <label>Contact List</label>
+                <div style="padding: 15px; border: 2px solid rgba(255,255,255,0.1); border-radius: 12px; background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.7);">
+                    Contacts are loaded from the shared <code style="background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 4px;">contacts.txt</code> file.
+                    <br><br>
+                    When you start a campaign, the system will automatically dial contacts that haven't been dialed by other agents.
+                </div>
             </div>
 
             <!-- Contact List -->

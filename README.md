@@ -5,8 +5,11 @@ A proof-of-concept sales dialer application using Twilio Voice SDK and FastAPI.
 ## Features
 
 - Browser-based softphone using Twilio Client JS SDK
-- Campaign creation with contact list
-- Conference-based dialing (agent joins conference, then customers are dialed in)
+- Multi-agent support with individual queues
+- Shared contact list from text file
+- Batch dialing with duplicate prevention across agents
+- Queue-based call connection (no conference required)
+- Answering machine detection and voicemail filtering
 
 ## Setup
 
@@ -35,13 +38,26 @@ You need to set up the following in your Twilio Console:
 Create a `.env` file in the project root:
 
 ```bash
+# Twilio Configuration
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_AUTH_TOKEN=your_auth_token
 TWILIO_API_KEY=SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_API_SECRET=your_api_secret
 TWILIO_TWIML_APP_SID=APxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_PHONE_NUMBER=+1234567890
+
+# Base URL for webhooks (update with your ngrok URL or server address)
+BASE_URL=https://your-server.ngrok.io
+
+# Campaign Configuration
+BATCH_DIAL_COUNT=5
 ```
+
+#### Environment Variables
+
+- `TWILIO_*`: Twilio API credentials (see setup section)
+- `BASE_URL`: Webhook URL for Twilio callbacks
+- `BATCH_DIAL_COUNT`: Number of contacts to dial in each batch (default: 5)
 
 ### 3. Install Dependencies
 
@@ -69,26 +85,47 @@ Open http://localhost:8000 in your browser.
 
 ## Usage
 
-1. **Initialize Dialer** - Click to get Twilio token and set up the browser phone
-2. **Enter Contacts** - Add phone numbers (one per line) in the right panel
-3. **Create Campaign** - Creates a campaign with your contact list
-4. **Join Conference** - Agent joins the conference room and waits
-5. (Next step: dial customers into the same conference)
+1. **Enter Agent Name** - Enter your name when prompted to identify yourself in the system
+2. **Start Campaign** - The system will automatically dial a batch of contacts from the shared contact list (`contacts.txt`)
+3. **Handle Calls** - When customers answer, you'll receive incoming calls on your device
+4. **Call Next Batch** - After completing calls, dial the next batch of undialed contacts
+5. **End Campaign** - Stop dialing and hang up all active calls
 
 ## Architecture
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   Browser       │────▶│   FastAPI       │────▶│   Twilio        │
+│   Agent Browser │────▶│   FastAPI       │────▶│   Twilio        │
 │   (Twilio SDK)  │◀────│   Backend       │◀────│   Voice API     │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
+                      │
+                      ▼
+               ┌─────────────────┐
+               │  Contact List   │
+               │  (contacts.txt) │
+               └─────────────────┘
 ```
+
+- **Contact List**: Shared text file with phone numbers
+- **Agent Registration**: Each agent gets a unique identity and WebSocket connection
+- **Batch Dialing**: Agents dial batches of contacts that haven't been dialed by others
+- **Queue Management**: Answered calls are queued and connected directly to agents
+- **Real-time Updates**: WebSocket connections provide live status updates
 
 ## API Endpoints
 
 - `GET /` - Serve frontend
 - `POST /api/token` - Get Twilio access token
-- `POST /api/campaign` - Create campaign with contacts
-- `GET /api/campaign/{id}` - Get campaign details
-- `POST /api/voice/conference` - TwiML for conference
-- `POST /api/voice/dial` - TwiML for outbound dialing
+- `POST /api/campaign/start` - Start agent campaign (batch dial contacts)
+- `POST /api/agent/{name}/dial-next-batch` - Dial next batch of contacts
+- `POST /api/agent/{name}/end` - End agent's campaign
+- `GET /api/agent/{name}/campaign` - Get agent's campaign details
+- `POST /api/voice/customer-queue` - TwiML for customer queue (when they answer)
+- `POST /api/voice/connect-agent` - TwiML to connect call to agent's device
+- `POST /api/voice/status` - Call status webhooks
+- `POST /api/voice/amd-status` - Answering machine detection results
+
+## Files
+
+- `contacts.txt` - Shared contact list (one phone number per line)
+- `.env` - Environment variables (see setup section)

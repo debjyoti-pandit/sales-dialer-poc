@@ -7,11 +7,13 @@ let campaign = null;
 let websocket = null;
 let isMuted = false;
 let currentConnectedPhone = null;
+let agentName = null;
 
 // DOM Elements
-let statusIndicator, statusText, agentInfo, startCampaignBtn, endCampaignBtn, muteBtn;
-let contactsInput, contactListContainer, contactList, contactCount, logContainer;
+let statusIndicator, statusText, agentInfo, agentNameDisplay, startCampaignBtn, endCampaignBtn, muteBtn;
+let contactListContainer, contactList, contactCount, logContainer;
 let dispositionModal, dispositionPhone, dispositionSelect, dispositionNotes;
+let agentNameModal, agentNameInput;
 
 // ============== Utility Functions ==============
 
@@ -46,6 +48,24 @@ function updateStatus(status, info = '') {
     if (info && agentInfo) {
         agentInfo.textContent = info;
     }
+}
+
+// ============== Agent Name ==============
+
+window.setAgentName = function() {
+    const name = agentNameInput.value.trim();
+    if (!name) {
+        alert('Please enter your name');
+        return;
+    }
+    
+    agentName = name;
+    agentNameModal.style.display = 'none';
+    agentNameDisplay.textContent = `Agent: ${agentName}`;
+    log(`Agent name set: ${agentName}`, 'success');
+    
+    // Connect WebSocket
+    connectWebSocket(agentName);
 }
 
 // ============== Mute Toggle ==============
@@ -110,47 +130,47 @@ window.submitDisposition = async function(callNext) {
     hideDispositionModal();
     
     if (callNext) {
-        // Call next contact
-        await dialNextContact();
+        // Dial next batch
+        await dialNextBatch();
     } else {
         log('Waiting for next action...', 'info');
-        updateStatus('ready', 'Ready to dial next contact');
+        updateStatus('ready', 'Ready for next call');
     }
 };
 
-async function dialNextContact() {
-    if (!campaign || !campaign.id) {
-        log('No active campaign', 'error');
+async function dialNextBatch() {
+    if (!agentName) {
+        log('No agent name', 'error');
         return;
     }
     
-    log('Dialing next contact...');
+    log('Dialing next batch...');
     
     try {
-        const response = await fetch(`/api/campaign/${campaign.id}/dial-next`, {
+        const response = await fetch(`/api/agent/${encodeURIComponent(agentName)}/dial-next-batch`, {
             method: 'POST'
         });
         
         if (response.ok) {
             const data = await response.json();
-            if (data.phone) {
-                log(`Calling ${data.phone}...`, 'success');
+            if (data.phones && data.phones.length > 0) {
+                log(`Calling ${data.count} contacts...`, 'success');
             } else {
                 log('No more contacts to dial', 'info');
                 updateStatus('idle', 'All contacts have been called');
             }
         }
     } catch (error) {
-        console.error('Error dialing next:', error);
-        log('Error dialing next contact', 'error');
+        console.error('Error dialing next batch:', error);
+        log('Error dialing next batch', 'error');
     }
 }
 
 // ============== WebSocket ==============
 
-function connectWebSocket(campaignId) {
+function connectWebSocket(agentName) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/${campaignId}`;
+    const wsUrl = `${protocol}//${window.location.host}/ws/${encodeURIComponent(agentName)}`;
     
     log(`Connecting to WebSocket...`);
     websocket = new WebSocket(wsUrl);
@@ -178,7 +198,7 @@ function handleWebSocketMessage(data) {
     console.log('WebSocket message:', data);
     
     switch (data.type) {
-        case 'campaign_state':
+        case 'agent_state':
             if (data.campaign) {
                 campaign = data.campaign;
                 updateContactStatus(data.campaign.contact_status);
@@ -190,9 +210,14 @@ function handleWebSocketMessage(data) {
             updateContactStatus(data.contact_status);
             break;
             
+        case 'call_queued':
+            log(`📞 ${data.phone} answered and queued`, 'success');
+            updateContactStatus(data.contact_status || {});
+            break;
+            
         case 'customer_connected':
             currentConnectedPhone = data.phone;
-            log(`🎉 ${data.phone} connected to conference!`, 'success');
+            log(`🎉 ${data.phone} connected!`, 'success');
             updateStatus('connected', `Speaking with ${data.phone}`);
             updateContactStatus(data.campaign.contact_status);
             // Show mute button when on call
@@ -202,17 +227,17 @@ function handleWebSocketMessage(data) {
         case 'call_ended':
             // Customer disconnected after being connected - show disposition modal
             log(`Call with ${data.phone} ended`, 'info');
-            currentConnectedPhone = null;  // Clear connected phone
+            currentConnectedPhone = null;
             if (muteBtn) muteBtn.style.display = 'none';
             updateStatus('ready', 'Call ended. Ready for next call.');
-            updateContactStatus(data.contact_status);  // Update status from backend
+            updateContactStatus(data.contact_status);
             showDispositionModal(data.phone);
             break;
             
         case 'auto_dial_next':
-            // Call failed without connecting - auto-dial next
-            log(`${data.reason} - dialing next...`, 'info');
-            setTimeout(() => dialNextContact(), 1000);
+            // Call failed without connecting - auto-dial next batch
+            log(`${data.reason} - dialing next batch...`, 'info');
+            setTimeout(() => dialNextBatch(), 1000);
             break;
             
         case 'campaign_ended':
@@ -231,47 +256,25 @@ function disconnectWebSocket() {
 // ============== Main Campaign Flow ==============
 
 window.startCampaign = async function() {
-    console.log('startCampaign called!');
-    
-    if (!contactsInput) {
-        console.error('contactsInput not found!');
-        alert('Error: Page not fully loaded. Please refresh.');
+    if (!agentName) {
+        alert('Please enter your name first');
+        agentNameModal.style.display = 'flex';
         return;
     }
     
-    const contactsText = contactsInput.value.trim();
-    
-    if (!contactsText) {
-        log('Please enter at least one contact', 'error');
-        return;
-    }
-
-    const contacts = contactsText
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => line.length > 0);
-
-    if (contacts.length === 0) {
-        log('No valid contacts found', 'error');
-        return;
-    }
-
     startCampaignBtn.disabled = true;
-    contactsInput.disabled = true;
-    updateStatus('connecting', 'Initializing dialer...');
-    log(`Starting campaign with ${contacts.length} contacts...`);
+    updateStatus('connecting', 'Starting campaign...');
+    log(`Starting campaign for agent ${agentName}...`);
 
     try {
-        // Create campaign
+        // Start campaign
         log('Creating campaign...');
-        const campaignResponse = await fetch('/api/campaign', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ contacts })
+        const campaignResponse = await fetch(`/api/campaign/start?agent_name=${encodeURIComponent(agentName)}`, {
+            method: 'POST'
         });
 
         if (!campaignResponse.ok) {
-            throw new Error('Failed to create campaign');
+            throw new Error('Failed to start campaign');
         }
 
         const data = await campaignResponse.json();
@@ -281,18 +284,20 @@ window.startCampaign = async function() {
         
         log(`Campaign created: ${campaign.id}`, 'success');
         log(`Token received. Identity: ${identity}`, 'success');
-        log('Contacts are being dialed...', 'success');
-        displayContacts(campaign);
-
-        // Connect WebSocket
-        connectWebSocket(campaign.id);
+        
+        if (campaign.contacts && campaign.contacts.length > 0) {
+            log(`Dialing ${campaign.contacts.length} contacts...`, 'success');
+            displayContacts(campaign);
+        } else {
+            log('No contacts available to dial', 'info');
+        }
 
         // Initialize Twilio Device
         await initializeDevice(token);
 
-        // Agent joins conference
-        log('Joining conference...');
-        await joinConference();
+        // Agent connects to queue
+        log('Connecting to queue...');
+        await connectToQueue(agentName);
 
         // Show/hide buttons
         startCampaignBtn.style.display = 'none';
@@ -303,7 +308,6 @@ window.startCampaign = async function() {
         log(`Error: ${error.message}`, 'error');
         updateStatus('error', 'Failed to start campaign');
         startCampaignBtn.disabled = false;
-        contactsInput.disabled = false;
         disconnectWebSocket();
     }
 };
@@ -344,7 +348,7 @@ function setupDeviceHandlers() {
     });
 
     device.on('incoming', function(call) {
-        log('Incoming call...');
+        log('Incoming call from queue...');
         setupCallHandlers(call);
         call.accept();
     });
@@ -369,14 +373,16 @@ function setupCallHandlers(call) {
     currentCall = call;
 
     call.on('accept', function() {
-        log('Connected to conference!', 'success');
-        updateStatus('ready', 'Waiting for leads to connect...');
+        log('Connected to call from queue!', 'success');
+        updateStatus('on-call', 'On call');
+        if (muteBtn) muteBtn.style.display = 'inline-block';
     });
 
     call.on('disconnect', function() {
-        log('Disconnected from conference');
+        log('Disconnected from call');
         currentCall = null;
-        updateStatus('idle', 'Call ended');
+        if (muteBtn) muteBtn.style.display = 'none';
+        updateStatus('ready', 'Ready for next call');
     });
 
     call.on('cancel', function() {
@@ -390,15 +396,11 @@ function setupCallHandlers(call) {
     });
 }
 
-async function joinConference() {
-    const call = await device.connect({
-        params: {
-            To: 'conference:SalesDialerConference'
-        }
-    });
-
-    setupCallHandlers(call);
-    log('Dialing into conference...', 'info');
+async function connectToQueue(agentName) {
+    // Connect to agent's queue - Twilio will call the device when a call is dequeued
+    // The device will receive an incoming call which we handle in setupDeviceHandlers
+    log('Ready to receive calls from queue', 'success');
+    updateStatus('ready', 'Waiting for calls from queue...');
 }
 
 // ============== UI Updates ==============
@@ -436,23 +438,18 @@ function updateContactStatus(contactStatus) {
             statusEl.textContent = formatStatus(status);
         }
         
-        // Only count as connected if status is actually 'in-progress'
-        // Don't show "Speaking with" if call has ended
         if (status === 'in-progress') {
             connectedCount++;
             connectedPhone = phone;
-            currentConnectedPhone = phone;  // Track current connected phone
+            currentConnectedPhone = phone;
         }
         if (status === 'ringing') ringingCount++;
         if (status === 'dialing' || status === 'initiated' || status === 'queued') dialingCount++;
     });
     
-    // Only show "Speaking with" if there's actually a connected call
-    // and we're not in the middle of showing a disposition modal
     if (connectedCount > 0 && currentConnectedPhone === connectedPhone) {
         updateStatus('connected', `🎉 Speaking with ${connectedPhone}`);
     } else if (connectedCount === 0 && currentConnectedPhone) {
-        // Call ended - clear the status
         currentConnectedPhone = null;
         if (ringingCount > 0) {
             updateStatus('ready', `📞 ${ringingCount} lead(s) ringing...`);
@@ -481,7 +478,8 @@ function formatStatus(status) {
         'busy': '🔴 Busy',
         'no-answer': '⚪ No Answer',
         'failed': '❌ Failed',
-        'canceled': '⚪ Cancelled'
+        'canceled': '⚪ Cancelled',
+        'voicemail': '📧 Voicemail'
     };
     return statusMap[status] || status;
 }
@@ -491,10 +489,10 @@ function formatStatus(status) {
 window.endCampaign = async function() {
     log('Ending campaign...');
     
-    if (campaign && campaign.id) {
+    if (agentName) {
         try {
-            await fetch(`/api/campaign/${campaign.id}/end`, { method: 'POST' });
-            log('All calls terminated', 'success');
+            await fetch(`/api/agent/${encodeURIComponent(agentName)}/end`, { method: 'POST' });
+            log('Campaign ended', 'success');
         } catch (error) {
             console.error('Error ending campaign:', error);
         }
@@ -524,7 +522,6 @@ window.endCampaign = async function() {
         muteBtn.classList.remove('muted');
         muteBtn.textContent = '🎤 Mute';
     }
-    contactsInput.disabled = false;
     
     updateStatus('idle', 'Campaign ended. Ready to start a new one.');
     log('Campaign ended', 'success');
@@ -539,27 +536,35 @@ document.addEventListener('DOMContentLoaded', function() {
     statusIndicator = document.getElementById('statusIndicator');
     statusText = document.getElementById('statusText');
     agentInfo = document.getElementById('agentInfo');
+    agentNameDisplay = document.getElementById('agentNameDisplay');
     startCampaignBtn = document.getElementById('startCampaignBtn');
     endCampaignBtn = document.getElementById('endCampaignBtn');
     muteBtn = document.getElementById('muteBtn');
-    contactsInput = document.getElementById('contactsInput');
     contactListContainer = document.getElementById('contactListContainer');
     contactList = document.getElementById('contactList');
     contactCount = document.getElementById('contactCount');
     logContainer = document.getElementById('logContainer');
     
-    // Disposition modal elements
+    // Modals
+    agentNameModal = document.getElementById('agentNameModal');
+    agentNameInput = document.getElementById('agentNameInput');
     dispositionModal = document.getElementById('dispositionModal');
     dispositionPhone = document.getElementById('dispositionPhone');
     dispositionSelect = document.getElementById('dispositionSelect');
     dispositionNotes = document.getElementById('dispositionNotes');
     
+    // Focus on agent name input
+    if (agentNameInput) {
+        agentNameInput.focus();
+        agentNameInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                setAgentName();
+            }
+        });
+    }
+    
     log('Sales Dialer POC loaded');
     
-    if (contactsInput) {
-        contactsInput.value = '+918436476635\n+918617020252';
-    }
-
     if (typeof Twilio !== 'undefined') {
         log('Twilio SDK loaded', 'success');
     } else {

@@ -47,9 +47,9 @@ class TwilioService:
         token.add_grant(voice_grant)
         return token.to_jwt(), identity
 
-    def dial_contact(self, phone_number: str, campaign_id: str):
+    def dial_contact(self, phone_number: str, campaign_id: str, agent_name: str = None):
         """Dial a single contact"""
-        print(f"Dialing contact {phone_number} for campaign {campaign_id}")
+        print(f"Dialing contact {phone_number} for campaign {campaign_id} (agent: {agent_name})")
 
         if not self.client:
             print(f"Twilio client not configured, skipping {phone_number}")
@@ -57,18 +57,19 @@ class TwilioService:
 
         # URL-encode the phone number to handle + sign
         encoded_phone = quote(phone_number, safe="")
+        encoded_agent = quote(agent_name or "", safe="")
 
         try:
             call = self.client.calls.create(
                 to=phone_number,
                 from_=TWILIO_PHONE_NUMBER,
-                url=f"{BASE_URL}/api/voice/customer-queue?campaign_id={campaign_id}&phone={encoded_phone}",
-                status_callback=f"{BASE_URL}/api/voice/status?campaign_id={campaign_id}&phone={encoded_phone}",
+                url=f"{BASE_URL}/api/voice/customer-queue?campaign_id={campaign_id}&phone={encoded_phone}&agent_name={encoded_agent}",
+                status_callback=f"{BASE_URL}/api/voice/status?campaign_id={campaign_id}&phone={encoded_phone}&agent_name={encoded_agent}",
                 status_callback_event=["initiated", "ringing", "answered", "completed"],
                 status_callback_method="POST",
                 machine_detection="Enable",  # Enable answering machine detection
                 async_amd="true",  # Use async AMD
-                async_amd_status_callback=f"{BASE_URL}/api/voice/amd-status?campaign_id={campaign_id}&phone={encoded_phone}",
+                async_amd_status_callback=f"{BASE_URL}/api/voice/amd-status?campaign_id={campaign_id}&phone={encoded_phone}&agent_name={encoded_agent}",
                 async_amd_status_callback_method="POST",
             )
             print(f"Call initiated to {phone_number}: {call.sid}")
@@ -127,21 +128,25 @@ class TwilioService:
             print(f"Error dequeuing call {call_sid} from queue {queue_name}: {e}")
             return False
     
-    def redirect_call_to_conference(self, call_sid: str, conference_name: str = None):
-        """Redirect a call to the conference"""
+    def dial_agent_device(self, agent_identity: str, customer_call_sid: str):
+        """Dial the agent's device and connect it to the customer call"""
         if not self.client:
             return False
         try:
-            conf_name = conference_name or CONFERENCE_NAME
-            encoded_conf = quote(conf_name, safe="")
-            self.client.calls(call_sid).update(
-                url=f"{BASE_URL}/api/voice/customer-join-conference?conference={encoded_conf}",
-                method="POST",
+            # Create a TwiML URL that will dial the agent's client
+            encoded_identity = quote(agent_identity, safe="")
+            encoded_call_sid = quote(customer_call_sid, safe="")
+            dial_url = f"{BASE_URL}/api/voice/connect-agent?agent_identity={encoded_identity}&customer_call_sid={encoded_call_sid}"
+            
+            # Update the customer call to dial the agent
+            self.client.calls(customer_call_sid).update(
+                url=dial_url,
+                method="POST"
             )
-            print(f"Redirected call {call_sid} to conference {conf_name}")
+            print(f"Dialing agent {agent_identity} for call {customer_call_sid}")
             return True
         except Exception as e:
-            print(f"Error redirecting call {call_sid} to conference: {e}")
+            print(f"Error dialing agent device: {e}")
             return False
 
 

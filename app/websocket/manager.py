@@ -1,16 +1,14 @@
 """WebSocket connection manager"""
-from app.storage import active_websockets, campaigns
+from app.storage import active_websockets, agents
 
 
-async def broadcast_to_campaign(campaign_id: str, message: dict):
-    """Send message to all WebSocket clients for a campaign"""
-    if campaign_id in active_websockets:
-        dead_sockets = set()
-        for ws in active_websockets[campaign_id]:
-            try:
-                await ws.send_json(message)
-            except:
-                dead_sockets.add(ws)
-        # Clean up dead connections
-        active_websockets[campaign_id] -= dead_sockets
+async def broadcast_to_agent(agent_name: str, message: dict):
+    """Send message to agent's WebSocket"""
+    if agent_name in active_websockets:
+        try:
+            await active_websockets[agent_name].send_json(message)
+        except:
+            # Connection is dead, remove it
+            if agent_name in active_websockets:
+                del active_websockets[agent_name]
 

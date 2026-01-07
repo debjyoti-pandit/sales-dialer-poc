@@ -21,7 +21,7 @@ app.include_router(voice_routes.router)
 app.include_router(static_routes.router)
 
 # WebSocket endpoint
-app.websocket("/ws/{campaign_id}")(websocket_endpoint)
+app.websocket("/ws/{agent_name}")(websocket_endpoint)
 
 
 if __name__ == "__main__":

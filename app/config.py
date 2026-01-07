@@ -22,3 +22,6 @@ CONFERENCE_NAME = "SalesDialerConference"
 # Detection settings
 DETECTION_TIMEOUT = 5  # seconds to wait for detection result
 QUEUE_HOLD_MUSIC_URL = "http://twimlets.com/holdmusic?Bucket=com.twilio.music.soft-rock"
+
+# Campaign settings
+BATCH_DIAL_COUNT = int(os.getenv("BATCH_DIAL_COUNT", "5"))
