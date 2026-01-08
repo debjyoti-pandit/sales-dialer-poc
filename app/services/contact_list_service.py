@@ -51,23 +51,24 @@ class ContactListService:
             self._contacts_cache = []
     
     def get_undialed_contacts(self, dialed_contacts: Set[str], count: int = 5) -> List[str]:
-        """Get contacts that haven't been dialed by any agent, recycling when all are dialed"""
+        """Get contacts that haven't been dialed by any agent, cycling through all contacts"""
         all_contacts = self.get_contacts()
 
         if not all_contacts:
             return []
 
-        # Get undialed contacts
+        # Get undialed contacts first
         undialed = [phone for phone in all_contacts if phone not in dialed_contacts]
 
         # If we have enough undialed contacts, return them
         if len(undialed) >= count:
             return undialed[:count]
 
-        # If we don't have enough undialed contacts, recycle from the beginning
-        result = undialed.copy()  # Start with all undialed contacts
+        # If we don't have enough undialed contacts, cycle through all contacts
+        # This ensures we always return contacts, cycling through the list
+        result = undialed.copy()  # Start with undialed contacts
 
-        # Add additional contacts from the beginning to make up the batch size
+        # Add more contacts from the beginning of the list to fill the batch
         needed = count - len(undialed)
         for phone in all_contacts:
             if len(result) >= count:
@@ -79,12 +80,31 @@ class ContactListService:
 
     def get_next_batch_preview(self, dialed_contacts: Set[str], current_batch: List[str], count: int = 5) -> List[str]:
         """Get preview of next batch of contacts that will be dialed after current batch"""
-        # Create a temporary set that includes the current batch as "dialed"
-        # so we can see what would be dialed next
-        temp_dialed = dialed_contacts.copy()
-        temp_dialed.update(current_batch)
+        all_contacts = self.get_contacts()
 
-        return self.get_undialed_contacts(temp_dialed, count)
+        if not all_contacts:
+            return []
+
+        # Simple approach: return the next contacts in the list after the current batch
+        # This ensures cycling through all contacts regardless of dial status
+        if current_batch:
+            # Find the last contact in the current batch
+            last_contact = current_batch[-1]
+            try:
+                last_index = all_contacts.index(last_contact)
+                # Start from the next contact, wrapping around to the beginning
+                next_index = (last_index + 1) % len(all_contacts)
+                result = []
+                for i in range(count):
+                    result.append(all_contacts[next_index])
+                    next_index = (next_index + 1) % len(all_contacts)
+                return result
+            except ValueError:
+                # If last_contact not found, start from beginning
+                pass
+
+        # Default: return first 'count' contacts
+        return all_contacts[:count]
 
 
 # Singleton instance

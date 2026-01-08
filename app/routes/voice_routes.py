@@ -179,11 +179,16 @@ async def voice_amd_status(request: Request, campaign_id: str = None, phone: str
 
     logger.call(phone, f"AMD result: {answered_by} - {machine_detection_status}")
 
-    # Process detection result
-    if campaign_id and phone and call_sid and agent_name:
-        await call_queue_service.process_detection_result(
-            campaign_id, call_sid, phone, detection_result, agent_name
-        )
+    # Broadcast AMD result to frontend for logging only
+    if campaign_id and agent_name:
+        await broadcast_to_agent(agent_name, {
+            "type": "amd_result",
+            "phone": phone,
+            "call_sid": call_sid,
+            "answered_by": answered_by,
+            "machine_detection_status": machine_detection_status,
+            "detection_result": detection_result
+        })
 
     # Return JSON response with proper Content-Type
     return JSONResponse(content={"status": "ok"})
@@ -216,17 +221,22 @@ async def voice_status(request: Request, campaign_id: str = None, phone: str = N
         campaign = campaign_service.get_campaign(campaign_id)
         if campaign:
             previous_status = campaign["contact_status"].get(phone, "pending")
-            
+
+            # Note: Call is already put in queue by the initial /contact-to-queue endpoint when answered
+
             # Check if this was the connected call and it ended
-            was_connected = previous_status == "in-progress" or campaign.get("connected_phone") == phone
+            was_connected = previous_status in ["in-progress", "queued", "connected"] or campaign.get("connected_phone") == phone
             call_ended = call_status in ["completed", "busy", "no-answer", "failed", "canceled"]
             call_failed_without_connecting = call_status in ["busy", "no-answer", "failed", "canceled"] and previous_status not in ["in-progress", "queued"]
-            
-            if was_connected and call_ended and previous_status == "in-progress":
-                # The connected customer's call ended - show disposition modal
+
+            if was_connected and call_ended:
+                # The customer's call ended - show disposition modal
                 campaign["connected_phone"] = None
                 campaign["status"] = "waiting"
-                
+
+                # Mark the call as completed in contact status
+                campaign["contact_status"][phone] = call_status
+
                 await broadcast_to_agent(agent_name, {
                     "type": "call_ended",
                     "phone": phone,
@@ -234,21 +244,23 @@ async def voice_status(request: Request, campaign_id: str = None, phone: str = N
                     "contact_status": campaign["contact_status"]
                 })
             elif call_failed_without_connecting:
-                # Call failed without connecting - auto-dial next batch
+                # Call failed without connecting - update status and auto-dial next batch
+                campaign["contact_status"][phone] = call_status
                 await broadcast_to_agent(agent_name, {
                     "type": "status_update",
                     "phone": phone,
                     "status": call_status,
                     "contact_status": campaign["contact_status"]
                 })
-                
+
                 # Auto-dial next batch after a short delay
                 await broadcast_to_agent(agent_name, {
                     "type": "auto_dial_next",
                     "reason": f"{phone} - {call_status}"
                 })
             else:
-                # Regular status update
+                # Regular status update - update contact status
+                campaign["contact_status"][phone] = call_status
                 await broadcast_to_agent(agent_name, {
                     "type": "status_update",
                     "phone": phone,
@@ -262,7 +274,7 @@ async def voice_status(request: Request, campaign_id: str = None, phone: str = N
 
 @router.post("/contact-to-queue")
 async def contact_to_queue(request: Request, campaign_id: str = None, phone: str = None, queue_name: str = None, agent_name: str = None):
-    """TwiML endpoint for contact to join the global wait queue after answering"""
+    """TwiML endpoint for contact to join campaign queue after answering"""
     response = VoiceResponse()
 
     # Normalize phone number
@@ -275,28 +287,78 @@ async def contact_to_queue(request: Request, campaign_id: str = None, phone: str
     form_data = await request.form()
     call_sid = form_data.get("CallSid", "")
 
-    logger.call(phone, f"Contact joining wait queue")
+    logger.call(phone, f"Contact joining campaign queue {queue_name}")
 
     # Update campaign status
     if campaign_id and phone and call_sid:
-        campaign_service.update_call_status(campaign_id, phone, "queued", call_sid)
+        campaign_service.update_call_status(campaign_id, phone, "connected", call_sid)  # Set to connected since bridging happens immediately
 
-        # Broadcast queue update to agent
+        # Set as connected phone since customer will immediately connect to waiting agent
+        campaign = campaign_service.get_campaign(campaign_id)
+        if campaign:
+            campaign["connected_phone"] = phone
+
+        # Broadcast connection update to agent
+        campaign = campaign_service.get_campaign(campaign_id)
         await broadcast_to_agent(agent_name or "unknown", {
-            "type": "call_queued",
+            "type": "customer_connected",
             "phone": phone,
             "call_sid": call_sid,
-            "queue_name": "wait"  # Always use the global wait queue
+            "queue_name": queue_name,
+            "campaign": {
+                "contact_status": campaign.get("contact_status", {}) if campaign else {}
+            }
         })
 
-    # Put contact in the global wait queue
-    enqueue = Enqueue(
-        wait_url=QUEUE_HOLD_MUSIC_URL,
-        wait_url_method="GET"
-    )
-    enqueue.append("wait")  # Global wait queue
-    response.append(enqueue)
+    # Connect customer to the campaign queue where agents are waiting
+    if queue_name:
+        dial = Dial()
+        dial.queue(queue_name)  # Connect to queue to be answered by waiting agents
+        response.append(dial)
+    else:
+        response.say("Queue not specified")
 
+    return create_twiml_response(response)
+
+
+@router.post("/trigger-dialing")
+async def trigger_dialing(campaign_id: str = None, queue_name: str = None):
+    """Webhook called when agent connects to queue - triggers contact dialing"""
+    import asyncio
+
+    logger.info(f"Agent connected to queue {queue_name} - triggering contact dialing for campaign {campaign_id}")
+
+    if not campaign_id:
+        return {"status": "error", "message": "No campaign_id provided"}
+
+    # Get campaign
+    campaign = campaign_service.get_campaign(campaign_id)
+    if not campaign:
+        return {"status": "error", "message": "Campaign not found"}
+
+    # Start dialing contacts asynchronously
+
+    loop = asyncio.get_event_loop()
+    def dial_contacts():
+        contacts_to_dial = []
+        for phone in campaign.get("contacts", []):
+            if campaign["contact_status"].get(phone) == "pending":
+                contacts_to_dial.append(phone)
+
+        logger.info(f"Dialing {len(contacts_to_dial)} pending contacts for campaign {campaign_id}")
+
+        for phone in contacts_to_dial:
+            campaign["contact_status"][phone] = "dialing"
+            call_sid = twilio_service.dial_contact_to_queue(phone, campaign_id, queue_name, campaign.get("agent_name"))
+            if call_sid:
+                campaign["call_sids"][phone] = call_sid
+                logger.call(phone, f"Dialing contact for campaign {campaign_id}")
+
+    loop.run_in_executor(None, dial_contacts)
+
+    # Return hold music TwiML
+    response = VoiceResponse()
+    response.play(QUEUE_HOLD_MUSIC_URL, loop=0)
     return create_twiml_response(response)
 
 
@@ -328,15 +390,17 @@ async def voice_dial(request: Request):
     response = VoiceResponse()
 
     if to.startswith("queue:"):
-        # Connect to the global wait queue (ignore the specific queue name)
-        dial = Dial()
-        dial.queue("wait")  # Always connect to global wait queue
-        response.append(dial)
-    elif to.startswith("wait:"):
-        # Agent is waiting - play hold music until connected
-        campaign_id = to.replace("wait:", "")
-        response.say("Waiting for customer calls. You will be connected automatically.")
-        response.play(QUEUE_HOLD_MUSIC_URL, loop=0)
+        # Put agent in the campaign queue to wait for customers
+        queue_name = to.replace("queue:", "")
+        campaign_id = queue_name.replace("campaign_", "")
+
+        # Trigger contact dialing when agent connects
+        enqueue = Enqueue(
+            wait_url=f"{BASE_URL}/api/voice/trigger-dialing?campaign_id={campaign_id}&queue_name={queue_name}",
+            wait_url_method="POST"
+        )
+        enqueue.append(queue_name)  # Campaign-specific queue
+        response.append(enqueue)
     elif to:
         dial = Dial(caller_id=TWILIO_PHONE_NUMBER)
         dial.number(to)

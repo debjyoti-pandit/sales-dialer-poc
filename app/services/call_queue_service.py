@@ -12,31 +12,30 @@ class CallQueueService:
     """Service for managing call queues"""
     
     def add_to_queue(self, agent_name: str, call_sid: str, phone: str):
-        """Add a call to the global wait queue"""
-        if "wait" not in call_queues:
-            call_queues["wait"] = []
+        """Add a call to the agent's queue"""
+        if agent_name not in call_queues:
+            call_queues[agent_name] = []
 
-        call_queues["wait"].append({
+        call_queues[agent_name].append({
             "call_sid": call_sid,
             "phone": phone,
-            "agent_name": agent_name,
             "queued_at": datetime.now().isoformat(),
             "status": "queued"
         })
 
-        logger.call(phone, f"Added to global wait queue for agent {agent_name}")
+        logger.call(phone, f"Added to queue for agent {agent_name}")
 
     def remove_from_queue(self, agent_name: str, call_sid: str):
-        """Remove a call from the global wait queue"""
-        if "wait" in call_queues:
-            call_queues["wait"] = [
-                call for call in call_queues["wait"]
+        """Remove a call from the agent's queue"""
+        if agent_name in call_queues:
+            call_queues[agent_name] = [
+                call for call in call_queues[agent_name]
                 if call["call_sid"] != call_sid
             ]
     
-    def get_queue(self, agent_name: str = None) -> list:
-        """Get all queued calls from the global wait queue"""
-        return call_queues.get("wait", [])
+    def get_queue(self, agent_name: str) -> list:
+        """Get all queued calls for an agent"""
+        return call_queues.get(agent_name, [])
     
     async def process_detection_result(self, campaign_id: str, call_sid: str, phone: str, detection_result: dict, agent_name: str = None):
         """Process detection result and connect call to agent's queue if appropriate"""
@@ -57,10 +56,10 @@ class CallQueueService:
         # Store detection result
         detection_results[call_sid] = detection_result
         
-        # Check if this call is still in the global wait queue
+        # Check if this call is still in queue
         queue_item = None
-        if "wait" in call_queues:
-            for item in call_queues["wait"]:
+        if agent_name in call_queues:
+            for item in call_queues[agent_name]:
                 if item["call_sid"] == call_sid:
                     queue_item = item
                     break

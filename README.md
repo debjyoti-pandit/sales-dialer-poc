@@ -110,10 +110,10 @@ Open http://localhost:8000 in your browser.
 ```
 
 - **Contact List**: Shared text file with phone numbers (auto-recycles when exhausted)
-- **Global Wait Queue**: Single Twilio queue for all agents and customers
-- **Agent Flow**: Agent connects to waiting state → hears hold music → gets connected when customers join queue
-- **Customer Flow**: Contacts dialed → answer → AMD check → join global wait queue → connect to available agent
-- **Simple Architecture**: One queue handles all call distribution automatically
+- **Campaign Queues**: Each campaign has its own Twilio queue
+- **Agent Flow**: Agent connects to campaign queue → hears hold music while waiting for customers
+- **Customer Flow**: Contacts dialed → answer (in-progress status) → join campaign queue → connect to agent
+- **Queue-based Connection**: Agent waits in queue, customers join same queue when they answer
 - **Batch Dialing**: Configurable batch sizes with duplicate prevention
 - **Real-time Updates**: WebSocket connections provide live status updates
 

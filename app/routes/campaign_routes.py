@@ -2,7 +2,9 @@
 from fastapi import APIRouter, HTTPException, Query
 from app.models.campaign import DispositionData
 from app.services.campaign_service import campaign_service
+from app.services.contact_list_service import contact_list_service
 from app.services.twilio_service import twilio_service
+from app.storage import agents, campaigns
 from app.logger import logger
 
 router = APIRouter(prefix="/api", tags=["campaign"])
@@ -52,6 +54,39 @@ async def save_disposition(campaign_id: str, data: DispositionData):
 async def dial_next_batch(agent_name: str):
     """Dial the next batch of undialed contacts for an agent"""
     result = campaign_service.dial_next_batch(agent_name)
+
+    # Debug: Log what we got back from dial_next_batch
+    logger.info(f"Dial next batch result: phones={result['phones']}, next_batch={result['next_batch']}")
+
+    # Get updated campaign data to broadcast to frontend
+    agent = agents.get(agent_name)
+    if agent:
+        campaign_id = agent.get("campaign_id")
+        if campaign_id and campaign_id in campaigns:
+            campaign = campaigns[campaign_id]
+
+            # Check if we're recycling (next batch contains previously dialed contacts)
+            from app.storage import dialed_contacts
+            next_batch_contacts = campaign.get("next_batch", [])
+            is_recycling = next_batch_contacts and any(contact in dialed_contacts for contact in next_batch_contacts)
+
+            # Debug logging
+            logger.info(f"Campaign update - Agent: {agent_name}, Contacts: {campaign['contacts']}, Next: {campaign.get('next_batch', [])}, Recycling: {is_recycling}")
+
+            # Broadcast updated campaign data including new contacts
+            campaign_data = {
+                "id": campaign["id"],
+                "contacts": campaign["contacts"],
+                "contact_status": campaign["contact_status"],
+                "next_batch": campaign.get("next_batch", []),
+                "is_recycling": is_recycling
+            }
+
+            from app.websocket.manager import broadcast_to_agent
+            await broadcast_to_agent(agent_name, {
+                "type": "campaign_updated",
+                "campaign": campaign_data
+            })
 
     if result["phones"]:
         return {

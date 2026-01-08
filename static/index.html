@@ -210,9 +210,10 @@
             border-left: 3px solid #3498db;
         }
 
-        .contact-item.in-progress, .contact-item.answered {
-            background: rgba(46, 204, 113, 0.15);
-            border-left: 3px solid #2ecc71;
+        .contact-item.in-progress, .contact-item.answered, .contact-item.connected {
+            background: rgba(46, 204, 113, 0.2);
+            border-left: 4px solid #2ecc71;
+            box-shadow: 0 2px 8px rgba(46, 204, 113, 0.3);
         }
 
         .contact-item.completed, .contact-item.busy, .contact-item.no-answer, .contact-item.failed {
@@ -225,6 +226,19 @@
             background: rgba(52, 152, 219, 0.1);
             border-left: 3px solid #3498db;
             opacity: 0.8;
+        }
+
+        .recycling-notice {
+            background: rgba(46, 204, 113, 0.2);
+            border: 2px solid #2ecc71;
+            border-radius: 6px;
+            padding: 10px 15px;
+            margin-bottom: 15px;
+            color: #27ae60;
+            font-weight: bold;
+            font-size: 1.1em;
+            text-align: center;
+            box-shadow: 0 2px 4px rgba(46, 204, 113, 0.3);
         }
 
         .contact-number {
@@ -455,6 +469,9 @@
 
             <!-- Next Batch Preview -->
             <div id="nextBatchContainer" class="contact-list" style="display: none;">
+                <div id="recyclingIndicator" class="recycling-notice" style="display: none;">
+                    🔄 <small>Recycling contacts - all numbers have been dialed</small>
+                </div>
                 <h3>🔜 Next Batch (<span id="nextBatchCount">0</span> contacts)</h3>
                 <div id="nextBatchList"></div>
             </div>

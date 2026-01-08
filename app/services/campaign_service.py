@@ -35,8 +35,8 @@ class CampaignService:
         for phone, agent_set in dialed_contacts.items():
             all_dialed.add(phone)
 
-        # Get undialed contacts from shared list
-        undialed_contacts = contact_list_service.get_undialed_contacts(all_dialed, batch_size)
+        # Get first batch of contacts (start cycling from beginning)
+        undialed_contacts = contact_list_service.get_next_batch_preview(set(), [], batch_size)
 
         if not undialed_contacts:
             return {
@@ -72,25 +72,14 @@ class CampaignService:
 
         campaigns[campaign_id] = campaign
 
-        # Mark contacts as being dialed by this agent
+        # Mark contacts as being dialed by this agent (but keep status as pending)
         for phone in undialed_contacts:
             if phone not in dialed_contacts:
                 dialed_contacts[phone] = set()
             dialed_contacts[phone].add(agent_name)
 
         # Agent will connect to queue directly via device.connect() in the frontend
-        # No backend action needed - the TwiML app will handle queue connection
-
-        # Dial contacts immediately (agent should connect to queue at the same time)
-        loop = asyncio.get_event_loop()
-        def dial_contacts():
-            for phone in undialed_contacts:
-                campaign["contact_status"][phone] = "dialing"
-                call_sid = twilio_service.dial_contact_to_queue(phone, campaign_id, agent_name)
-                if call_sid:
-                    campaign["call_sids"][phone] = call_sid
-
-        loop.run_in_executor(executor, dial_contacts)
+        # Contacts will be dialed when agent connects via the /dial endpoint webhook
 
         return campaign
 
@@ -144,22 +133,22 @@ class CampaignService:
         for phone, agent_set in dialed_contacts.items():
             all_dialed.add(phone)
 
-        # Get undialed contacts
-        undialed_contacts = contact_list_service.get_undialed_contacts(all_dialed, batch_size)
+        # Get next batch in cycle based on current campaign contacts
+        current_batch = campaign.get("contacts", [])
+        undialed_contacts = contact_list_service.get_next_batch_preview(set(), current_batch, batch_size)
 
         if not undialed_contacts:
             return {"phones": [], "next_batch": []}
 
         # Get preview of next batch (after this one is dialed)
-        next_batch_preview = contact_list_service.get_next_batch_preview(all_dialed, undialed_contacts, batch_size)
+        next_batch_preview = contact_list_service.get_next_batch_preview(set(), undialed_contacts, batch_size)
 
         # Update campaign with next batch preview
         campaign["next_batch"] = next_batch_preview
 
-        # Add new contacts to campaign
+        # Replace contacts with new batch (don't accumulate old contacts)
+        campaign["contacts"] = undialed_contacts.copy()
         for phone in undialed_contacts:
-            if phone not in campaign["contacts"]:
-                campaign["contacts"].append(phone)
             campaign["contact_status"][phone] = "dialing"
 
             # Mark as dialed by this agent
@@ -170,9 +159,10 @@ class CampaignService:
         # Batch dial contacts
         loop = asyncio.get_event_loop()
         dialed_phones = []
+        queue_name = campaign.get("queue_name", f"campaign_{campaign_id}")
         for phone in undialed_contacts:
             def dial_and_store(phone_num=phone):
-                call_sid = twilio_service.dial_contact(phone_num, campaign_id, agent_name)
+                call_sid = twilio_service.dial_contact_to_queue(phone_num, campaign_id, queue_name, agent_name)
                 if call_sid:
                     campaign["call_sids"][phone_num] = call_sid
                     dialed_phones.append(phone_num)
