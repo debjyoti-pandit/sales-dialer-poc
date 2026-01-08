@@ -19,15 +19,25 @@ async def get_twilio_token():
     return {"token": token, "identity": identity}
 
 
+@router.get("/campaigns")
+async def get_campaigns():
+    """Get list of available campaigns"""
+    campaigns_list = contact_list_service.get_campaigns()
+    return {"campaigns": campaigns_list}
+
+
 @router.post("/campaign/start")
-async def start_campaign(agent_name: str = Query(..., description="Agent name")):
+async def start_campaign(
+    agent_name: str = Query(..., description="Agent name"),
+    campaign_list_id: int = Query(..., description="Campaign list ID")
+):
     """Start campaign for an agent - add to queue and dial batch of contacts"""
     
     token, identity = twilio_service.generate_token()
     if not token:
         raise HTTPException(status_code=500, detail="Twilio credentials not configured.")
     
-    campaign = campaign_service.start_agent_campaign(agent_name, identity)
+    campaign = campaign_service.start_agent_campaign(agent_name, identity, campaign_list_id=campaign_list_id)
     
     return {
         "campaign": campaign,

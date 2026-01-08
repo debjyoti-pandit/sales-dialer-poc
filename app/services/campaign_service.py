@@ -14,7 +14,7 @@ executor = ThreadPoolExecutor(max_workers=10)
 class CampaignService:
     """Service for managing campaigns"""
 
-    def start_agent_campaign(self, agent_name: str, identity: str, batch_size: int = BATCH_DIAL_COUNT) -> dict:
+    def start_agent_campaign(self, agent_name: str, identity: str, campaign_list_id: int = None, batch_size: int = BATCH_DIAL_COUNT) -> dict:
         """Start a campaign for an agent - connect agent to queue first, then dial contacts"""
         campaign_id = uuid.uuid4().hex[:8]
         queue_name = f"campaign_{campaign_id}"
@@ -23,6 +23,7 @@ class CampaignService:
         agent = {
             "name": agent_name,
             "campaign_id": campaign_id,
+            "campaign_list_id": campaign_list_id,  # Store the selected campaign list ID
             "status": "waiting_in_queue",
             "identity": identity,
             "connected_phone": None,
@@ -35,8 +36,8 @@ class CampaignService:
         for phone, agent_set in dialed_contacts.items():
             all_dialed.add(phone)
 
-        # Get first batch of contacts (start cycling from beginning)
-        undialed_contacts = contact_list_service.get_next_batch_preview(set(), [], batch_size)
+        # Get first batch of contacts (start cycling from beginning) - use campaign_list_id
+        undialed_contacts = contact_list_service.get_next_batch_preview(set(), [], batch_size, campaign_id=campaign_list_id)
 
         if not undialed_contacts:
             return {
@@ -52,13 +53,14 @@ class CampaignService:
                 "queue_name": queue_name
             }
 
-        # Get preview of next batch
-        next_batch_preview = contact_list_service.get_next_batch_preview(all_dialed, undialed_contacts, batch_size)
+        # Get preview of next batch - use campaign_list_id
+        next_batch_preview = contact_list_service.get_next_batch_preview(all_dialed, undialed_contacts, batch_size, campaign_id=campaign_list_id)
 
         # Create campaign
         campaign = {
             "id": campaign_id,
             "agent_name": agent_name,
+            "campaign_list_id": campaign_list_id,  # Store the selected campaign list ID
             "contacts": undialed_contacts,
             "contact_status": {phone: "pending" for phone in undialed_contacts},
             "call_sids": {},
@@ -127,21 +129,22 @@ class CampaignService:
             return {"phones": [], "next_batch": []}
 
         campaign = campaigns[campaign_id]
+        campaign_list_id = campaign.get("campaign_list_id") or agent.get("campaign_list_id")
 
         # Get all dialed contacts across all agents
         all_dialed = set()
         for phone, agent_set in dialed_contacts.items():
             all_dialed.add(phone)
 
-        # Get next batch in cycle based on current campaign contacts
+        # Get next batch in cycle based on current campaign contacts - use campaign_list_id
         current_batch = campaign.get("contacts", [])
-        undialed_contacts = contact_list_service.get_next_batch_preview(set(), current_batch, batch_size)
+        undialed_contacts = contact_list_service.get_next_batch_preview(set(), current_batch, batch_size, campaign_id=campaign_list_id)
 
         if not undialed_contacts:
             return {"phones": [], "next_batch": []}
 
-        # Get preview of next batch (after this one is dialed)
-        next_batch_preview = contact_list_service.get_next_batch_preview(set(), undialed_contacts, batch_size)
+        # Get preview of next batch (after this one is dialed) - use campaign_list_id
+        next_batch_preview = contact_list_service.get_next_batch_preview(set(), undialed_contacts, batch_size, campaign_id=campaign_list_id)
 
         # Update campaign with next batch preview
         campaign["next_batch"] = next_batch_preview

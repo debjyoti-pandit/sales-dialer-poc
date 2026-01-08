@@ -8,12 +8,13 @@ let websocket = null;
 let isMuted = false;
 let currentConnectedPhone = null;
 let agentName = null;
+let selectedCampaignId = null;
 
 // DOM Elements
 let statusIndicator, statusText, agentInfo, agentNameDisplay, startCampaignBtn, endCampaignBtn, muteBtn;
 let contactListContainer, contactList, contactCount, logContainer;
 let dispositionModal, dispositionPhone, dispositionSelect, dispositionNotes;
-let agentNameModal, agentNameInput;
+let agentNameModal, agentNameInput, campaignSelect;
 
 // ============== Utility Functions ==============
 
@@ -59,10 +60,18 @@ window.setAgentName = function() {
         return;
     }
     
+    const campaignId = campaignSelect.value;
+    if (!campaignId) {
+        alert('Please select a campaign');
+        return;
+    }
+    
     agentName = name;
+    selectedCampaignId = parseInt(campaignId);
     agentNameModal.style.display = 'none';
     agentNameDisplay.textContent = `Agent: ${agentName}`;
     log(`Agent name set: ${agentName}`, 'success');
+    log(`Campaign selected: ${campaignSelect.options[campaignSelect.selectedIndex].text}`, 'success');
     
     // Connect WebSocket
     connectWebSocket(agentName);
@@ -337,7 +346,7 @@ window.startCampaign = async function() {
     try {
         // Start campaign
         log('Creating campaign...');
-        const campaignResponse = await fetch(`/api/campaign/start?agent_name=${encodeURIComponent(agentName)}`, {
+        const campaignResponse = await fetch(`/api/campaign/start?agent_name=${encodeURIComponent(agentName)}&campaign_list_id=${selectedCampaignId}`, {
             method: 'POST'
         });
 
@@ -692,10 +701,14 @@ document.addEventListener('DOMContentLoaded', function() {
     // Modals
     agentNameModal = document.getElementById('agentNameModal');
     agentNameInput = document.getElementById('agentNameInput');
+    campaignSelect = document.getElementById('campaignSelect');
     dispositionModal = document.getElementById('dispositionModal');
     dispositionPhone = document.getElementById('dispositionPhone');
     dispositionSelect = document.getElementById('dispositionSelect');
     dispositionNotes = document.getElementById('dispositionNotes');
+    
+    // Load campaigns
+    loadCampaigns();
     
     // Focus on agent name input
     if (agentNameInput) {
@@ -715,3 +728,33 @@ document.addEventListener('DOMContentLoaded', function() {
         log('Twilio SDK not loaded!', 'error');
     }
 });
+
+// ============== Campaign Loading ==============
+
+async function loadCampaigns() {
+    if (!campaignSelect) return;
+    
+    try {
+        const response = await fetch('/api/campaigns');
+        if (response.ok) {
+            const data = await response.json();
+            campaignSelect.innerHTML = '<option value="">Select a campaign...</option>';
+            
+            if (data.campaigns && data.campaigns.length > 0) {
+                data.campaigns.forEach(campaign => {
+                    const option = document.createElement('option');
+                    option.value = campaign.id;
+                    option.textContent = campaign.name;
+                    campaignSelect.appendChild(option);
+                });
+            } else {
+                campaignSelect.innerHTML = '<option value="">No campaigns available</option>';
+            }
+        } else {
+            campaignSelect.innerHTML = '<option value="">Error loading campaigns</option>';
+        }
+    } catch (error) {
+        console.error('Error loading campaigns:', error);
+        campaignSelect.innerHTML = '<option value="">Error loading campaigns</option>';
+    }
+}

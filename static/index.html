@@ -399,11 +399,18 @@
     <div id="agentNameModal" class="modal" style="display: flex;">
         <div class="modal-content">
             <h2>👤 Enter Your Name</h2>
-            <p>Please enter your name to start using the dialer.</p>
+            <p>Please enter your name and select a campaign to start using the dialer.</p>
             
             <div class="form-group">
                 <label>Agent Name:</label>
                 <input type="text" id="agentNameInput" placeholder="Enter your name" style="width: 100%; padding: 12px; border: 2px solid rgba(255,255,255,0.1); border-radius: 8px; background: rgba(255,255,255,0.05); color: #fff; font-size: 1rem;" />
+            </div>
+            
+            <div class="form-group">
+                <label>Select Campaign:</label>
+                <select id="campaignSelect" style="width: 100%; padding: 12px; border: 2px solid rgba(255,255,255,0.1); border-radius: 8px; background: rgba(255,255,255,0.05); color: #fff; font-size: 1rem;">
+                    <option value="">Loading campaigns...</option>
+                </select>
             </div>
             
             <div class="modal-actions">
