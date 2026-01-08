@@ -326,8 +326,6 @@ async def trigger_dialing(campaign_id: str = None, queue_name: str = None):
     """Webhook called when agent connects to queue - triggers contact dialing"""
     import asyncio
 
-    logger.info(f"Agent connected to queue {queue_name} - triggering contact dialing for campaign {campaign_id}")
-
     if not campaign_id:
         return {"status": "error", "message": "No campaign_id provided"}
 
@@ -336,25 +334,30 @@ async def trigger_dialing(campaign_id: str = None, queue_name: str = None):
     if not campaign:
         return {"status": "error", "message": "Campaign not found"}
 
-    # Start dialing contacts asynchronously
+    logger.info(f"Agent connected to queue {queue_name} - campaign {campaign_id}, status: {campaign.get('status')}")
 
-    loop = asyncio.get_event_loop()
-    def dial_contacts():
-        contacts_to_dial = []
-        for phone in campaign.get("contacts", []):
-            if campaign["contact_status"].get(phone) == "pending":
-                contacts_to_dial.append(phone)
+    # Only dial contacts if this is the initial agent connection (not a reconnection after disposition)
+    if campaign.get("status") == "agent_in_queue":
+        # Start dialing contacts asynchronously
+        loop = asyncio.get_event_loop()
+        def dial_contacts():
+            contacts_to_dial = []
+            for phone in campaign.get("contacts", []):
+                if campaign["contact_status"].get(phone) == "pending":
+                    contacts_to_dial.append(phone)
 
-        logger.info(f"Dialing {len(contacts_to_dial)} pending contacts for campaign {campaign_id}")
+            logger.info(f"Dialing {len(contacts_to_dial)} pending contacts for campaign {campaign_id}")
 
-        for phone in contacts_to_dial:
-            campaign["contact_status"][phone] = "dialing"
-            call_sid = twilio_service.dial_contact_to_queue(phone, campaign_id, queue_name, campaign.get("agent_name"))
-            if call_sid:
-                campaign["call_sids"][phone] = call_sid
-                logger.call(phone, f"Dialing contact for campaign {campaign_id}")
+            for phone in contacts_to_dial:
+                campaign["contact_status"][phone] = "dialing"
+                call_sid = twilio_service.dial_contact_to_queue(phone, campaign_id, queue_name, campaign.get("agent_name"))
+                if call_sid:
+                    campaign["call_sids"][phone] = call_sid
+                    logger.call(phone, f"Dialing contact for campaign {campaign_id}")
 
-    loop.run_in_executor(None, dial_contacts)
+        loop.run_in_executor(None, dial_contacts)
+    else:
+        logger.info(f"Agent reconnected to queue {queue_name} - waiting for manual dial command")
 
     # Return hold music TwiML
     response = VoiceResponse()

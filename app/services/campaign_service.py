@@ -179,6 +179,10 @@ class CampaignService:
         campaign = campaigns[campaign_id]
         campaign["status"] = "ended"
 
+        # Reset all contact statuses to "ended"
+        for phone in campaign.get("contacts", []):
+            campaign["contact_status"][phone] = "ended"
+
         # Update agent status
         agent_name = campaign.get("agent_name")
         if agent_name and agent_name in agents:

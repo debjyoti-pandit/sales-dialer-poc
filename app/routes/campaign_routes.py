@@ -105,13 +105,19 @@ async def end_agent_campaign(agent_name: str):
     success = campaign_service.end_agent_campaign(agent_name)
     if not success:
         raise HTTPException(status_code=404, detail="Agent not found")
-    
+
+    # Get the campaign to broadcast final status
+    agent = agents.get(agent_name)
+    campaign_id = agent.get("campaign_id") if agent else None
+    campaign = campaigns.get(campaign_id) if campaign_id else None
+
     from app.websocket.manager import broadcast_to_agent
     await broadcast_to_agent(agent_name, {
         "type": "campaign_ended",
-        "agent_name": agent_name
+        "agent_name": agent_name,
+        "contact_status": campaign.get("contact_status", {}) if campaign else {}
     })
-    
+
     return {"status": "ended"}
 
 

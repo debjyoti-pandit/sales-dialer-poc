@@ -143,14 +143,25 @@ async function dialNextBatch() {
         log('No agent name', 'error');
         return;
     }
-    
-    log('Dialing next batch...');
-    
+
+    if (!campaign || !campaign.queue_name) {
+        log('No active campaign or queue name', 'error');
+        return;
+    }
+
+    log('Connecting to queue and dialing next batch...');
+
     try {
+        // First, connect agent back to the queue
+        updateStatus('connecting', 'Connecting to queue...');
+        await connectToCampaignQueue(campaign.queue_name);
+
+        // Then dial the next batch
+        log('Dialing next batch...');
         const response = await fetch(`/api/agent/${encodeURIComponent(agentName)}/dial-next-batch`, {
             method: 'POST'
         });
-        
+
         if (response.ok) {
             const data = await response.json();
             if (data.phones && data.phones.length > 0) {
@@ -167,8 +178,9 @@ async function dialNextBatch() {
             }
         }
     } catch (error) {
-        console.error('Error dialing next batch:', error);
-        log('Error dialing next batch', 'error');
+        console.error('Error in dial next batch flow:', error);
+        log(`Error: ${error.message}`, 'error');
+        updateStatus('ready', 'Ready for next call');
     }
 }
 
@@ -294,6 +306,10 @@ function handleWebSocketMessage(data) {
             
         case 'campaign_ended':
             log('Campaign ended by server');
+            // Update contact statuses to show they are ended
+            if (data.contact_status) {
+                updateContactStatus(data.contact_status);
+            }
             break;
     }
 }
@@ -606,7 +622,8 @@ function formatStatus(status) {
         'no-answer': '⚪ No Answer',
         'failed': '❌ Failed',
         'canceled': '⚪ Cancelled',
-        'voicemail': '📧 Voicemail'
+        'voicemail': '📧 Voicemail',
+        'ended': '🏁 Campaign Ended'
     };
     return statusMap[status] || status;
 }
