@@ -129,9 +129,9 @@ class TwilioService:
             return False
     
 
-    def dial_contact_to_queue(self, phone_number: str, campaign_id: str, queue_name: str, agent_name: str):
-        """Dial a contact and put them directly in the campaign queue when they answer"""
-        logger.call(phone_number, f"Dialing contact for campaign {campaign_id} to queue {queue_name}")
+    def dial_contact_to_agent_queue(self, phone_number: str, campaign_id: str, queue_name: str, agent_name: str):
+        """Dial a contact and put them directly in the agent queue when they answer"""
+        logger.call(phone_number, f"Dialing contact for campaign {campaign_id} to agent queue {queue_name}")
 
         if not self.client:
             logger.error(f"Twilio client not configured, skipping {phone_number}")
@@ -144,7 +144,7 @@ class TwilioService:
         encoded_agent = quote(agent_name or "", safe="")
 
         try:
-            # Create TwiML URL that puts contact directly in campaign queue
+            # Create TwiML URL that puts contact directly in the agent queue
             queue_url = f"{BASE_URL}/api/voice/contact-to-queue?campaign_id={encoded_campaign}&phone={encoded_phone}&queue_name={encoded_queue}&agent_name={encoded_agent}"
 
             call = self.client.calls.create(
@@ -164,6 +164,10 @@ class TwilioService:
         except Exception as e:
             logger.error(f"Error dialing {phone_number}: {e}")
             return None
+
+    # Backward-compatible alias (older code paths)
+    def dial_contact_to_queue(self, phone_number: str, campaign_id: str, queue_name: str, agent_name: str):
+        return self.dial_contact_to_agent_queue(phone_number, campaign_id, queue_name, agent_name)
 
 
     def dial_agent_device(self, agent_identity: str, customer_call_sid: str):

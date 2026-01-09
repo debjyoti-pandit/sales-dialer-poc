@@ -10,6 +10,7 @@ from app.websocket.manager import broadcast_to_agent
 from app.storage import agents
 from app.logger import logger
 from urllib.parse import quote
+import re
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
@@ -83,7 +84,8 @@ async def voice_customer_queue(request: Request, campaign_id: str = None, phone:
     
     # Use Twilio's <Enqueue> verb to put call in agent's queue
     # Queue name is based on agent_name
-    queue_name = f"agent_{agent_name}" if agent_name else "default_queue"
+    safe_agent_name = re.sub(r"[^A-Za-z0-9_]", "_", agent_name or "")
+    queue_name = f"agent_{safe_agent_name}" if safe_agent_name else "default_queue"
 
     # URL encode parameters for action URL
     encoded_phone = quote(phone, safe='') if phone else ''
@@ -274,7 +276,7 @@ async def voice_status(request: Request, campaign_id: str = None, phone: str = N
 
 @router.post("/contact-to-queue")
 async def contact_to_queue(request: Request, campaign_id: str = None, phone: str = None, queue_name: str = None, agent_name: str = None):
-    """TwiML endpoint for contact to join campaign queue after answering"""
+    """TwiML endpoint for contact to join agent queue after answering"""
     response = VoiceResponse()
 
     # Normalize phone number
@@ -287,7 +289,7 @@ async def contact_to_queue(request: Request, campaign_id: str = None, phone: str
     form_data = await request.form()
     call_sid = form_data.get("CallSid", "")
 
-    logger.call(phone, f"Contact joining campaign queue {queue_name}")
+    logger.call(phone, f"Contact joining agent queue {queue_name}")
 
     # Update campaign status
     if campaign_id and phone and call_sid:
@@ -310,7 +312,7 @@ async def contact_to_queue(request: Request, campaign_id: str = None, phone: str
             }
         })
 
-    # Connect customer to the campaign queue where agents are waiting
+    # Connect customer to the agent queue where the agent is waiting
     if queue_name:
         dial = Dial()
         dial.queue(queue_name)  # Connect to queue to be answered by waiting agents
@@ -322,9 +324,13 @@ async def contact_to_queue(request: Request, campaign_id: str = None, phone: str
 
 
 @router.post("/trigger-dialing")
-async def trigger_dialing(campaign_id: str = None, queue_name: str = None):
+async def trigger_dialing(campaign_id: str = None, queue_name: str = None, agent_name: str = None):
     """Webhook called when agent connects to queue - triggers contact dialing"""
     import asyncio
+    from app.config import BATCH_DIAL_COUNT
+
+    if not campaign_id and agent_name and agent_name in agents:
+        campaign_id = agents[agent_name].get("campaign_id")
 
     if not campaign_id:
         return {"status": "error", "message": "No campaign_id provided"}
@@ -341,19 +347,25 @@ async def trigger_dialing(campaign_id: str = None, queue_name: str = None):
         # Start dialing contacts asynchronously
         loop = asyncio.get_event_loop()
         def dial_contacts():
-            contacts_to_dial = []
-            for phone in campaign.get("contacts", []):
-                if campaign["contact_status"].get(phone) == "pending":
-                    contacts_to_dial.append(phone)
+            contacts_to_dial = [
+                phone for phone in campaign.get("contacts", [])
+                if campaign["contact_status"].get(phone) == "pending"
+            ][:BATCH_DIAL_COUNT]
 
             logger.info(f"Dialing {len(contacts_to_dial)} pending contacts for campaign {campaign_id}")
 
             for phone in contacts_to_dial:
                 campaign["contact_status"][phone] = "dialing"
-                call_sid = twilio_service.dial_contact_to_queue(phone, campaign_id, queue_name, campaign.get("agent_name"))
+                call_sid = twilio_service.dial_contact_to_agent_queue(phone, campaign_id, queue_name, campaign.get("agent_name"))
                 if call_sid:
                     campaign["call_sids"][phone] = call_sid
                     logger.call(phone, f"Dialing contact for campaign {campaign_id}")
+
+            remaining_pending = [
+                phone for phone in campaign.get("contacts", [])
+                if campaign["contact_status"].get(phone) == "pending"
+            ]
+            campaign["next_batch"] = remaining_pending[:BATCH_DIAL_COUNT]
 
         loop.run_in_executor(None, dial_contacts)
     else:
@@ -366,7 +378,7 @@ async def trigger_dialing(campaign_id: str = None, queue_name: str = None):
 
 
 @router.post("/connect-agent")
-async def connect_agent(request: Request, agent_identity: str = None, customer_call_sid: str = None):
+async def connect_agent(_request: Request, agent_identity: str = None, customer_call_sid: str = None):
     """TwiML endpoint to connect a customer call to an agent's device"""
     response = VoiceResponse()
     
@@ -389,17 +401,25 @@ async def voice_dial(request: Request):
     """TwiML endpoint for outbound dialing (used by TwiML App)"""
     form_data = await request.form()
     to = form_data.get("To", "")
+    campaign_id = form_data.get("campaign_id")
+    agent_name = form_data.get("agent_name")
 
     response = VoiceResponse()
 
     if to.startswith("queue:"):
-        # Put agent in the campaign queue to wait for customers
+        # Put agent in the agent-specific queue to wait for customers
         queue_name = to.replace("queue:", "")
-        campaign_id = queue_name.replace("campaign_", "")
+        # Backward compatibility: previously queue name was campaign_{campaign_id}
+        if not campaign_id and queue_name.startswith("campaign_"):
+            campaign_id = queue_name.replace("campaign_", "")
+
+        # If campaign_id still not provided, try resolving via agent_name
+        if not campaign_id and agent_name and agent_name in agents:
+            campaign_id = agents[agent_name].get("campaign_id")
 
         # Trigger contact dialing when agent connects
         enqueue = Enqueue(
-            wait_url=f"{BASE_URL}/api/voice/trigger-dialing?campaign_id={campaign_id}&queue_name={queue_name}",
+            wait_url=f"{BASE_URL}/api/voice/trigger-dialing?campaign_id={campaign_id}&queue_name={queue_name}&agent_name={quote(agent_name or '', safe='')}",
             wait_url_method="POST"
         )
         enqueue.append(queue_name)  # Campaign-specific queue

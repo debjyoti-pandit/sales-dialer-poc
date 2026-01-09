@@ -9,10 +9,15 @@ let isMuted = false;
 let currentConnectedPhone = null;
 let agentName = null;
 let selectedCampaignId = null;
+let visibleContacts = [];
+let callHistoryByPhone = {};
+let answeredPhones = new Set();
+let historyCampaignId = null;
 
 // DOM Elements
 let statusIndicator, statusText, agentInfo, agentNameDisplay, startCampaignBtn, endCampaignBtn, muteBtn;
 let contactListContainer, contactList, contactCount, logContainer;
+let callHistoryContainer, callHistoryList, callHistoryCount;
 let dispositionModal, dispositionPhone, dispositionSelect, dispositionNotes;
 let agentNameModal, agentNameInput, campaignSelect;
 
@@ -158,12 +163,12 @@ async function dialNextBatch() {
         return;
     }
 
-    log('Connecting to queue and dialing next batch...');
+    log('Connecting to agent queue and dialing next batch...');
 
     try {
-        // First, connect agent back to the queue
-        updateStatus('connecting', 'Connecting to queue...');
-        await connectToCampaignQueue(campaign.queue_name);
+        // First, connect agent back to the agent queue
+        updateStatus('connecting', 'Connecting to agent queue...');
+        await connectToAgentQueue(campaign.queue_name);
 
         // Then dial the next batch
         log('Dialing next batch...');
@@ -175,11 +180,7 @@ async function dialNextBatch() {
             const data = await response.json();
             if (data.phones && data.phones.length > 0) {
                 log(`Calling ${data.count} contacts...`, 'success');
-                // Update next batch preview
-                if (campaign && data.next_batch) {
-                    campaign.next_batch = data.next_batch;
-                    displayNextBatch(data.next_batch);
-                }
+                // No "Next Batch" UI (agent has a fixed assigned pool)
             } else {
                 log('No more contacts to dial', 'info');
                 // Don't update the UI here - let the campaign_updated message handle it
@@ -257,7 +258,6 @@ function handleWebSocketMessage(data) {
                 console.log('=== CAMPAIGN UPDATED ===');
                 console.log('Campaign:', {
                     contacts: data.campaign.contacts,
-                    next_batch: data.campaign.next_batch,
                     is_recycling: data.campaign.is_recycling
                 });
 
@@ -271,7 +271,7 @@ function handleWebSocketMessage(data) {
                     console.log('Calling displayContacts...');
                     displayContacts(data.campaign);
                     console.log('displayContacts completed');
-                    log(`Campaign updated: contacts=${data.campaign.contacts.length}, next_batch=${data.campaign.next_batch ? data.campaign.next_batch.length : 0}, recycling=${data.campaign.is_recycling}`, 'info');
+                    log(`Campaign updated: contacts=${data.campaign.contacts.length}`, 'info');
                     console.log('=== CAMPAIGN UPDATE COMPLETE ===');
 
                 } catch (error) {
@@ -372,9 +372,9 @@ window.startCampaign = async function() {
         // Initialize Twilio Device
         await initializeDevice(token);
 
-        // Connect agent directly to campaign queue (will hear hold music until connected)
-        log('Connecting to campaign queue - waiting for calls...');
-        await connectToCampaignQueue(campaign.queue_name);
+        // Connect agent directly to agent queue (will hear hold music until connected)
+        log('Connecting to agent queue - waiting for calls...');
+        await connectToAgentQueue(campaign.queue_name);
 
         // Show/hide buttons
         startCampaignBtn.style.display = 'none';
@@ -470,25 +470,114 @@ function setupCallHandlers(call) {
     });
 }
 
-async function connectToCampaignQueue(queueName) {
-    // Connect agent directly to campaign queue where customer is waiting
+async function connectToAgentQueue(queueName) {
+    // Connect agent directly to their queue where customers will be bridged
     const call = await device.connect({
         params: {
-            To: `queue:${queueName}`
+            To: `queue:${queueName}`,
+            campaign_id: campaign ? campaign.id : '',
+            agent_name: agentName || ''
         }
     });
 
     setupCallHandlers(call);
-    log('Connected to campaign queue - waiting for calls...', 'success');
+    log('Connected to agent queue - waiting for calls...', 'success');
     updateStatus('ready', 'Waiting for leads to connect');
 }
 
 // ============== UI Updates ==============
 
+function isTerminalContactStatus(status) {
+    return [
+        'completed',
+        'busy',
+        'no-answer',
+        'failed',
+        'canceled',
+        'ended',
+        'voicemail'
+    ].includes(status);
+}
+
+function markAnsweredIfApplicable(phone, status) {
+    if (['queued', 'connected', 'in-progress', 'answered'].includes(status)) {
+        answeredPhones.add(phone);
+    }
+}
+
+function formatOutcome(phone, terminalStatus) {
+    if (answeredPhones.has(phone)) return '✅ Answered';
+    if (terminalStatus === 'busy') return '⛔ Busy / Rejected';
+    if (terminalStatus === 'no-answer') return '⚪ No Answer';
+    if (terminalStatus === 'failed') return '❌ Failed';
+    if (terminalStatus === 'canceled') return '⚪ Canceled';
+    if (terminalStatus === 'voicemail') return '📧 Voicemail';
+    if (terminalStatus === 'ended') return '🏁 Ended';
+    if (terminalStatus === 'completed') return '✓ Completed';
+    return formatStatus(terminalStatus);
+}
+
+function renderCallHistory() {
+    // Re-check DOM elements availability
+    callHistoryContainer = document.getElementById('callHistoryContainer');
+    callHistoryList = document.getElementById('callHistoryList');
+    callHistoryCount = document.getElementById('callHistoryCount');
+
+    if (!callHistoryContainer || !callHistoryList || !callHistoryCount) return;
+
+    const entries = Object.values(callHistoryByPhone || {}).sort((a, b) => b.updatedAt - a.updatedAt);
+
+    if (!entries.length) {
+        callHistoryContainer.style.display = 'none';
+        callHistoryCount.textContent = '0';
+        callHistoryList.innerHTML = '';
+        return;
+    }
+
+    callHistoryContainer.style.display = 'block';
+    callHistoryCount.textContent = String(entries.length);
+
+    callHistoryList.innerHTML = entries.map((e) => `
+        <div class="contact-item ${e.status}" data-phone="${e.phone}">
+            <span class="contact-number">${e.phone}</span>
+            <span class="contact-status ${e.status}">${e.outcome}</span>
+        </div>
+    `).join('');
+}
+
+function renderContacts() {
+    if (!campaign) return;
+
+    // Re-check DOM elements availability (in case they were removed/recreated)
+    contactListContainer = document.getElementById('contactListContainer');
+    contactList = document.getElementById('contactList');
+    contactCount = document.getElementById('contactCount');
+
+    if (!contactListContainer || !contactList || !contactCount) return;
+
+    const statusMap = campaign.contact_status || {};
+    visibleContacts = (campaign.contacts || []).filter((phone) => {
+        const status = statusMap[phone] || 'pending';
+        return !isTerminalContactStatus(status);
+    });
+
+    contactListContainer.style.display = 'block';
+    contactCount.textContent = visibleContacts.length;
+
+    contactList.innerHTML = visibleContacts.map((phone) => {
+        const status = statusMap[phone] || 'pending';
+        return `
+            <div class="contact-item ${status}" data-phone="${phone}">
+                <span class="contact-number">${phone}</span>
+                <span class="contact-status ${status}">${formatStatus(status)}</span>
+            </div>
+        `;
+    }).join('');
+}
+
 function displayContacts(campaignData) {
     console.log('displayContacts:', {
         contacts: campaignData.contacts,
-        next_batch: campaignData.next_batch,
         is_recycling: campaignData.is_recycling
     });
 
@@ -503,92 +592,56 @@ function displayContacts(campaignData) {
     }
 
     try {
-        contactListContainer.style.display = 'block';
-        contactCount.textContent = campaignData.contacts.length;
+        const prevCampaignId = campaign ? campaign.id : null;
 
-        contactList.innerHTML = campaignData.contacts.map((contact, index) => `
-            <div class="contact-item" id="contact-${index}" data-phone="${contact}">
-                <span class="contact-number">${contact}</span>
-                <span class="contact-status pending" id="status-${index}">Pending</span>
-            </div>
-        `).join('');
+        // Keep global campaign state in sync, then render.
+        campaign = campaignData;
+        campaign.contacts = campaignData.contacts || [];
+        campaign.contact_status = campaignData.contact_status || {};
+        // Only reset outcomes/history when this is a NEW campaign.
+        // (campaign_updated snapshots should NOT wipe previous outcomes.)
+        if (!historyCampaignId || historyCampaignId !== campaign.id || (prevCampaignId && prevCampaignId !== campaign.id)) {
+            callHistoryByPhone = {};
+            answeredPhones = new Set();
+            historyCampaignId = campaign.id || null;
+        }
+        renderContacts();
+        renderCallHistory();
 
-        // Display next batch preview if available
-        console.log('About to call displayNextBatch with:', campaignData.next_batch, campaignData.is_recycling);
-        displayNextBatch(campaignData.next_batch || [], campaignData.is_recycling || false);
+        // No "Next Batch" panel (agent has a fixed assigned pool)
     } catch (error) {
         console.error('Error in displayContacts:', error);
     }
 }
 
-function displayNextBatch(nextBatchContacts, isRecycling = false) {
-    console.log('displayNextBatch:', {
-        contacts: nextBatchContacts,
-        is_recycling: isRecycling
-    });
-
-    // Re-check DOM elements availability
-    const nextBatchContainer = document.getElementById('nextBatchContainer');
-    const nextBatchList = document.getElementById('nextBatchList');
-    const nextBatchCount = document.getElementById('nextBatchCount');
-    const recyclingIndicator = document.getElementById('recyclingIndicator');
-
-    if (!nextBatchContainer || !nextBatchList || !nextBatchCount) {
-        console.log('ERROR: Next batch elements not found');
-        return;
-    }
-
-    try {
-        console.log('nextBatchContacts check:', nextBatchContacts, 'length:', nextBatchContacts ? nextBatchContacts.length : 'undefined');
-
-        if (nextBatchContacts && nextBatchContacts.length > 0) {
-            console.log('Showing next batch container');
-            nextBatchContainer.style.display = 'block';
-            nextBatchCount.textContent = nextBatchContacts.length;
-
-        // Show/hide recycling indicator
-        if (recyclingIndicator) {
-            recyclingIndicator.style.display = isRecycling ? 'block' : 'none';
-            console.log('Recycling indicator set to:', isRecycling ? 'block' : 'none');
-        } else {
-            console.log('Recycling indicator element not found!');
-        }
-
-        nextBatchList.innerHTML = nextBatchContacts.map((contact, index) => `
-            <div class="contact-item next-batch">
-                <span class="contact-number">${contact}</span>
-                <span class="contact-status" style="background: rgba(52, 152, 219, 0.3); color: #3498db;">Up Next</span>
-            </div>
-        `).join('');
-        console.log('Next batch displayed:', nextBatchContacts.length, 'contacts');
-    } else {
-        nextBatchContainer.style.display = 'none';
-        console.log('Next batch hidden - no contacts');
-    }
-    } catch (error) {
-        console.error('Error in displayNextBatch:', error);
-    }
-}
+// Next batch UI removed (agent has a fixed assigned pool)
 
 function updateContactStatus(contactStatus) {
     if (!campaign) return;
+    const prevStatus = campaign.contact_status || {};
+    campaign.contact_status = contactStatus || {};
     
     let connectedCount = 0;
     let ringingCount = 0;
     let dialingCount = 0;
     let connectedPhone = null;
     
-    campaign.contacts.forEach((phone, index) => {
-        const status = contactStatus[phone] || 'pending';
-        const itemEl = document.getElementById(`contact-${index}`);
-        const statusEl = document.getElementById(`status-${index}`);
-        
-        if (itemEl && statusEl) {
-            itemEl.className = `contact-item ${status}`;
-            statusEl.className = `contact-status ${status}`;
-            statusEl.textContent = formatStatus(status);
+    (campaign.contacts || []).forEach((phone) => {
+        const status = (contactStatus || {})[phone] || 'pending';
+        markAnsweredIfApplicable(phone, status);
+
+        if (isTerminalContactStatus(status)) {
+            const prev = prevStatus[phone] || 'pending';
+            // Record outcome when a call first reaches a terminal state (or if it changes)
+            if (!isTerminalContactStatus(prev) || prev !== status) {
+                callHistoryByPhone[phone] = {
+                    phone,
+                    status,
+                    outcome: formatOutcome(phone, status),
+                    updatedAt: Date.now()
+                };
+            }
         }
-        
         if (status === 'in-progress' || status === 'connected') {
             connectedCount++;
             connectedPhone = phone;
@@ -597,6 +650,10 @@ function updateContactStatus(contactStatus) {
         if (status === 'ringing') ringingCount++;
         if (status === 'dialing' || status === 'initiated' || status === 'queued') dialingCount++;
     });
+
+    // Update the UI list; terminal statuses get removed from screen.
+    renderContacts();
+    renderCallHistory();
     
     if (connectedCount > 0 && currentConnectedPhone === connectedPhone) {
         updateStatus('connected', `Speaking with ${connectedPhone}`);
@@ -641,13 +698,22 @@ function formatStatus(status) {
 
 window.endCampaign = async function() {
     log('Ending campaign...');
+    if (endCampaignBtn) endCampaignBtn.disabled = true;
     
     if (agentName) {
         try {
-            await fetch(`/api/agent/${encodeURIComponent(agentName)}/end`, { method: 'POST' });
-            log('Campaign ended', 'success');
+            const resp = await fetch(`/api/agent/${encodeURIComponent(agentName)}/end`, { method: 'POST' });
+            const data = await resp.json().catch(() => ({}));
+            if (resp.ok && data.status === 'no_active_campaign') {
+                log('No active campaign to end (already ended)', 'info');
+            } else if (resp.ok) {
+                log('Campaign ended', 'success');
+            } else {
+                log(`Failed to end campaign (${resp.status})`, 'error');
+            }
         } catch (error) {
             console.error('Error ending campaign:', error);
+            log(`Error ending campaign: ${error.message}`, 'error');
         }
     }
     
@@ -663,6 +729,10 @@ window.endCampaign = async function() {
     hideDispositionModal();
     
     campaign = null;
+    callHistoryByPhone = {};
+    answeredPhones = new Set();
+    historyCampaignId = null;
+    renderCallHistory();
     currentCall = null;
     device = null;
     isMuted = false;
@@ -696,6 +766,9 @@ document.addEventListener('DOMContentLoaded', function() {
     contactListContainer = document.getElementById('contactListContainer');
     contactList = document.getElementById('contactList');
     contactCount = document.getElementById('contactCount');
+    callHistoryContainer = document.getElementById('callHistoryContainer');
+    callHistoryList = document.getElementById('callHistoryList');
+    callHistoryCount = document.getElementById('callHistoryCount');
     logContainer = document.getElementById('logContainer');
     
     // Modals

@@ -114,7 +114,9 @@ async def end_agent_campaign(agent_name: str):
     """End campaign for an agent and hang up all calls"""
     success = campaign_service.end_agent_campaign(agent_name)
     if not success:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        # Idempotent end: if agent is missing or has no active campaign,
+        # treat as already ended (frontend may retry / double-click).
+        return {"status": "no_active_campaign"}
 
     # Get the campaign to broadcast final status
     agent = agents.get(agent_name)

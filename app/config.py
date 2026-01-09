@@ -24,3 +24,5 @@ DETECTION_TIMEOUT = 5  # seconds to wait for detection result
 QUEUE_HOLD_MUSIC_URL = "http://com.twilio.sounds.music.s3.amazonaws.com/ClockworkWaltz.mp3"
 # Campaign settings
 BATCH_DIAL_COUNT = int(os.getenv("BATCH_DIAL_COUNT", "5"))
+# How many contacts to assign (reserve) per agent per campaign selection
+AGENT_CONTACT_POOL_SIZE = int(os.getenv("AGENT_CONTACT_POOL_SIZE", "20"))

@@ -5,10 +5,10 @@ A proof-of-concept sales dialer application using Twilio Voice SDK and FastAPI.
 ## Features
 
 - Browser-based softphone using Twilio Client JS SDK
-- Campaign-based queue system (one queue per campaign)
+- Agent-based queue system (one queue per agent)
 - Shared contact list from text file with automatic recycling
 - Batch dialing with duplicate prevention across agents
-- Agents hear hold music while waiting in campaign queue
+- Agents hear hold music while waiting in agent queue
 - Automatic agent-customer connection via Twilio queues
 - Answering machine detection and voicemail filtering
 - Real-time status updates via WebSocket
@@ -88,7 +88,7 @@ Open http://localhost:8000 in your browser.
 ## Usage
 
 1. **Enter Agent Name** - Enter your name when prompted to identify yourself in the system
-2. **Start Campaign** - Your device connects directly to the campaign queue where you'll hear hold music
+2. **Start Campaign** - Your device connects directly to your agent queue where you'll hear hold music
 3. **Receive Calls** - Customers who answer are automatically connected to you through the queue
 4. **Handle Calls** - Bridge established automatically - just talk to the connected customer
 5. **Call Next Batch** - Request additional contacts to be dialed from the shared list
@@ -110,9 +110,9 @@ Open http://localhost:8000 in your browser.
 ```
 
 - **Contact List**: Shared text file with phone numbers (auto-recycles when exhausted)
-- **Campaign Queues**: Each campaign has its own Twilio queue
-- **Agent Flow**: Agent connects to campaign queue → hears hold music while waiting for customers
-- **Customer Flow**: Contacts dialed → answer (in-progress status) → join campaign queue → connect to agent
+- **Agent Queues**: Each agent has their own Twilio queue
+- **Agent Flow**: Agent connects to agent queue → hears hold music while waiting for customers
+- **Customer Flow**: Contacts dialed by agent → answer (in-progress status) → join agent queue → connect to that agent
 - **Queue-based Connection**: Agent waits in queue, customers join same queue when they answer
 - **Batch Dialing**: Configurable batch sizes with duplicate prevention
 - **Real-time Updates**: WebSocket connections provide live status updates

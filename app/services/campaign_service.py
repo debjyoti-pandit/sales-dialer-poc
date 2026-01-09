@@ -1,10 +1,11 @@
 """Campaign service for managing campaigns"""
 import uuid
+import re
 from typing import Optional
-from app.storage import campaigns, agents, dialed_contacts
+from app.storage import campaigns, agents, dialed_contacts, campaign_contact_reservations
 from app.services.twilio_service import twilio_service
 from app.services.contact_list_service import contact_list_service
-from app.config import BATCH_DIAL_COUNT
+from app.config import BATCH_DIAL_COUNT, AGENT_CONTACT_POOL_SIZE
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 
@@ -17,7 +18,9 @@ class CampaignService:
     def start_agent_campaign(self, agent_name: str, identity: str, campaign_list_id: int = None, batch_size: int = BATCH_DIAL_COUNT) -> dict:
         """Start a campaign for an agent - connect agent to queue first, then dial contacts"""
         campaign_id = uuid.uuid4().hex[:8]
-        queue_name = f"campaign_{campaign_id}"
+        # Agent-specific Twilio queue so only this agent can receive their dialed contacts
+        safe_agent_name = re.sub(r"[^A-Za-z0-9_]", "_", agent_name or "unknown")
+        queue_name = f"agent_{safe_agent_name}"
 
         # Create or update agent
         agent = {
@@ -31,15 +34,21 @@ class CampaignService:
         }
         agents[agent_name] = agent
 
-        # Get all dialed contacts across all agents
-        all_dialed = set()
-        for phone, agent_set in dialed_contacts.items():
-            all_dialed.add(phone)
+        # Reserve a fixed pool of contacts for this agent within the selected campaign list.
+        # This prevents another agent selecting the same campaign from seeing these contacts.
+        if campaign_list_id is None:
+            campaign_list_id = 1  # fallback to first campaign if not provided
 
-        # Get first batch of contacts (start cycling from beginning) - use campaign_list_id
-        undialed_contacts = contact_list_service.get_next_batch_preview(set(), [], batch_size, campaign_id=campaign_list_id)
+        reservations = campaign_contact_reservations.setdefault(int(campaign_list_id), {})
+        excluded = set(reservations.keys()) | set(dialed_contacts.keys())
 
-        if not undialed_contacts:
+        all_contacts = contact_list_service.get_contacts(campaign_id=campaign_list_id)
+        assigned_contacts = [p for p in all_contacts if p not in excluded][:AGENT_CONTACT_POOL_SIZE]
+
+        for phone in assigned_contacts:
+            reservations[phone] = agent_name
+
+        if not assigned_contacts:
             return {
                 "id": campaign_id,
                 "agent_name": agent_name,
@@ -53,16 +62,17 @@ class CampaignService:
                 "queue_name": queue_name
             }
 
-        # Get preview of next batch - use campaign_list_id
-        next_batch_preview = contact_list_service.get_next_batch_preview(all_dialed, undialed_contacts, batch_size, campaign_id=campaign_list_id)
+        # First dial batch preview (what will be dialed when agent connects)
+        next_batch_preview = assigned_contacts[:batch_size]
 
         # Create campaign
         campaign = {
             "id": campaign_id,
             "agent_name": agent_name,
             "campaign_list_id": campaign_list_id,  # Store the selected campaign list ID
-            "contacts": undialed_contacts,
-            "contact_status": {phone: "pending" for phone in undialed_contacts},
+            # Full reserved pool for this agent (typically 20)
+            "contacts": assigned_contacts,
+            "contact_status": {phone: "pending" for phone in assigned_contacts},
             "call_sids": {},
             "dispositions": {},
             "status": "agent_in_queue",
@@ -73,12 +83,6 @@ class CampaignService:
         }
 
         campaigns[campaign_id] = campaign
-
-        # Mark contacts as being dialed by this agent (but keep status as pending)
-        for phone in undialed_contacts:
-            if phone not in dialed_contacts:
-                dialed_contacts[phone] = set()
-            dialed_contacts[phone].add(agent_name)
 
         # Agent will connect to queue directly via device.connect() in the frontend
         # Contacts will be dialed when agent connects via the /dial endpoint webhook
@@ -118,7 +122,7 @@ class CampaignService:
         return campaign["dispositions"][phone]
 
     def dial_next_batch(self, agent_name: str, batch_size: int = BATCH_DIAL_COUNT) -> dict:
-        """Dial next batch of undialed contacts for an agent"""
+        """Dial next batch of pending contacts from agent's reserved pool"""
         if agent_name not in agents:
             return {"phones": [], "next_batch": []}
 
@@ -129,49 +133,35 @@ class CampaignService:
             return {"phones": [], "next_batch": []}
 
         campaign = campaigns[campaign_id]
-        campaign_list_id = campaign.get("campaign_list_id") or agent.get("campaign_list_id")
-
-        # Get all dialed contacts across all agents
-        all_dialed = set()
-        for phone, agent_set in dialed_contacts.items():
-            all_dialed.add(phone)
-
-        # Get next batch in cycle based on current campaign contacts - use campaign_list_id
-        current_batch = campaign.get("contacts", [])
-        undialed_contacts = contact_list_service.get_next_batch_preview(set(), current_batch, batch_size, campaign_id=campaign_list_id)
-
-        if not undialed_contacts:
+        pending = [p for p in campaign.get("contacts", []) if campaign["contact_status"].get(p) == "pending"]
+        to_dial = pending[:batch_size]
+        if not to_dial:
+            campaign["next_batch"] = []
             return {"phones": [], "next_batch": []}
 
-        # Get preview of next batch (after this one is dialed) - use campaign_list_id
-        next_batch_preview = contact_list_service.get_next_batch_preview(set(), undialed_contacts, batch_size, campaign_id=campaign_list_id)
-
-        # Update campaign with next batch preview
-        campaign["next_batch"] = next_batch_preview
-
-        # Replace contacts with new batch (don't accumulate old contacts)
-        campaign["contacts"] = undialed_contacts.copy()
-        for phone in undialed_contacts:
+        # Mark selected as dialing
+        for phone in to_dial:
             campaign["contact_status"][phone] = "dialing"
 
-            # Mark as dialed by this agent
-            if phone not in dialed_contacts:
-                dialed_contacts[phone] = set()
-            dialed_contacts[phone].add(agent_name)
-
-        # Batch dial contacts
         loop = asyncio.get_event_loop()
         dialed_phones = []
-        queue_name = campaign.get("queue_name", f"campaign_{campaign_id}")
-        for phone in undialed_contacts:
+        safe_agent_name = re.sub(r"[^A-Za-z0-9_]", "_", agent_name or "unknown")
+        queue_name = campaign.get("queue_name") or f"agent_{safe_agent_name}"
+        for phone in to_dial:
             def dial_and_store(phone_num=phone):
-                call_sid = twilio_service.dial_contact_to_queue(phone_num, campaign_id, queue_name, agent_name)
+                call_sid = twilio_service.dial_contact_to_agent_queue(phone_num, campaign_id, queue_name, agent_name)
                 if call_sid:
                     campaign["call_sids"][phone_num] = call_sid
                     dialed_phones.append(phone_num)
+                    if phone_num not in dialed_contacts:
+                        dialed_contacts[phone_num] = set()
+                    dialed_contacts[phone_num].add(agent_name)
 
             loop.run_in_executor(executor, dial_and_store)
 
+        remaining_pending = [p for p in campaign.get("contacts", []) if campaign["contact_status"].get(p) == "pending"]
+        next_batch_preview = remaining_pending[:batch_size]
+        campaign["next_batch"] = next_batch_preview
         return {"phones": dialed_phones, "next_batch": next_batch_preview}
 
     def end_campaign(self, campaign_id: str):
@@ -191,6 +181,16 @@ class CampaignService:
         if agent_name and agent_name in agents:
             agents[agent_name]["status"] = "inactive"
             agents[agent_name].pop("campaign_id", None)
+
+        # Release reserved contacts for this agent + campaign list
+        campaign_list_id = campaign.get("campaign_list_id")
+        if campaign_list_id is not None:
+            reservations = campaign_contact_reservations.get(int(campaign_list_id), {})
+            for phone in campaign.get("contacts", []):
+                if reservations.get(phone) == agent_name:
+                    reservations.pop(phone, None)
+            if not reservations and int(campaign_list_id) in campaign_contact_reservations:
+                campaign_contact_reservations.pop(int(campaign_list_id), None)
 
         # Hang up all calls
         call_sids = campaign.get("call_sids", {})
@@ -222,7 +222,6 @@ class CampaignService:
         campaign = campaigns[campaign_id]
 
         if phone in campaign["contact_status"]:
-            previous_status = campaign["contact_status"].get(phone)
             campaign["contact_status"][phone] = call_status
 
             # Store call SID

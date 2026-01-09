@@ -20,3 +20,7 @@ detection_results: Dict[str, dict] = {}
 # Global dialed contacts tracking: phone -> set of agent_names who dialed it
 dialed_contacts: Dict[str, Set[str]] = {}
 
+# Per-campaign contact reservations: campaign_list_id -> {phone: agent_name}
+# Used to ensure two agents selecting the same campaign don't see the same assigned contacts.
+campaign_contact_reservations: Dict[int, Dict[str, str]] = {}
+
