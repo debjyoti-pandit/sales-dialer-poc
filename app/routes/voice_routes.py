@@ -218,22 +218,46 @@ async def voice_status(request: Request, campaign_id: str = None, phone: str = N
     logger.call(phone, f"Status: {call_status}")
     
     if campaign_id and phone and agent_name:
-        campaign_service.update_call_status(campaign_id, phone, call_status, call_sid)
-        
         campaign = campaign_service.get_campaign(campaign_id)
         if campaign:
-            previous_status = campaign["contact_status"].get(phone, "pending")
+            previous_status = campaign.get("contact_status", {}).get(phone, "pending")
+
+            # If backend already marked this as "answered but dropped", do not overwrite
+            # it with Twilio's later terminal statuses like "completed".
+            if previous_status == "answered_disconnected_by_system":
+                return JSONResponse(content={"status": "ok"})
+
+        campaign_service.update_call_status(campaign_id, phone, call_status, call_sid)
+
+        campaign = campaign_service.get_campaign(campaign_id)
+        if campaign:
+            previous_status = campaign.get("contact_status", {}).get(phone, "pending")
 
             # Note: Call is already put in queue by the initial /contact-to-queue endpoint when answered
 
             # Check if this was the connected call and it ended
             was_connected = previous_status in ["in-progress", "queued", "connected"] or campaign.get("connected_phone") == phone
             call_ended = call_status in ["completed", "busy", "no-answer", "failed", "canceled"]
-            call_failed_without_connecting = call_status in ["busy", "no-answer", "failed", "canceled"] and previous_status not in ["in-progress", "queued"]
+            # Best-effort agent busy tracking (in case frontend call-state isn't sent)
+            agent = agents.get(agent_name)
+            if agent:
+                if call_status == "in-progress":
+                    agent["in_call"] = True
+                    agent["connected_phone"] = phone
+                if call_ended:
+                    if agent.get("connected_phone") == phone:
+                        agent.pop("connected_phone", None)
+                        agent["in_call"] = False
+                    # Clear reservation if this was the reserved phone
+                    if agent.get("reserved_phone") == phone:
+                        agent.pop("reserved_phone", None)
+                        agent.pop("call_slot_reserved", None)
 
             if was_connected and call_ended:
                 # The customer's call ended - show disposition modal
                 campaign["connected_phone"] = None
+                campaign.pop("call_slot_reserved", None)
+                campaign.pop("reserved_phone", None)
                 campaign["status"] = "waiting"
 
                 # Mark the call as completed in contact status
@@ -244,21 +268,6 @@ async def voice_status(request: Request, campaign_id: str = None, phone: str = N
                     "phone": phone,
                     "status": call_status,
                     "contact_status": campaign["contact_status"]
-                })
-            elif call_failed_without_connecting:
-                # Call failed without connecting - update status and auto-dial next batch
-                campaign["contact_status"][phone] = call_status
-                await broadcast_to_agent(agent_name, {
-                    "type": "status_update",
-                    "phone": phone,
-                    "status": call_status,
-                    "contact_status": campaign["contact_status"]
-                })
-
-                # Auto-dial next batch after a short delay
-                await broadcast_to_agent(agent_name, {
-                    "type": "auto_dial_next",
-                    "reason": f"{phone} - {call_status}"
                 })
             else:
                 # Regular status update - update contact status
@@ -291,24 +300,61 @@ async def contact_to_queue(request: Request, campaign_id: str = None, phone: str
 
     logger.call(phone, f"Contact joining agent queue {queue_name}")
 
-    # Update campaign status
-    if campaign_id and phone and call_sid:
-        campaign_service.update_call_status(campaign_id, phone, "connected", call_sid)  # Set to connected since bridging happens immediately
+    # Resolve agent_name from campaign if not provided
+    campaign = campaign_service.get_campaign(campaign_id) if campaign_id else None
+    if not agent_name and campaign:
+        agent_name = campaign.get("agent_name")
 
-        # Set as connected phone since customer will immediately connect to waiting agent
-        campaign = campaign_service.get_campaign(campaign_id)
-        if campaign:
-            campaign["connected_phone"] = phone
+    # Campaign-level single-slot reservation:
+    # when dialing multiple numbers, if more than one answers, keep the first and disconnect the rest.
+    if campaign and agent_name and phone and call_sid:
+        reserved_phone = campaign.get("reserved_phone")
+        slot_reserved = bool(campaign.get("call_slot_reserved"))
 
-        # Broadcast connection update to agent
-        campaign = campaign_service.get_campaign(campaign_id)
-        await broadcast_to_agent(agent_name or "unknown", {
+        if slot_reserved and reserved_phone and reserved_phone != phone:
+            # Contact answered, but agent slot already taken -> disconnect from our end
+            contact_status = campaign.setdefault("contact_status", {})
+            call_sids = campaign.setdefault("call_sids", {})
+            contact_status[phone] = "answered_disconnected_by_system"
+            call_sids[phone] = call_sid
+
+            await broadcast_to_agent(agent_name, {
+                "type": "status_update",
+                "phone": phone,
+                "status": "answered_disconnected_by_system",
+                "contact_status": campaign.get("contact_status", {})
+            })
+
+            logger.call(phone, f"Slot taken ({reserved_phone}) - disconnecting answered call {call_sid}")
+            twilio_service.hangup_call(call_sid)
+
+            hangup_resp = VoiceResponse()
+            hangup_resp.say("Sorry, no agents are available. Goodbye.")
+            hangup_resp.hangup()
+            return create_twiml_response(hangup_resp)
+
+        # Reserve slot for the first answered call
+        campaign.update({
+            "call_slot_reserved": True,
+            "reserved_phone": phone,
+            "connected_phone": phone,
+        })
+
+        # Contact answered and is being bridged to the agent queue.
+        # Use an "in-progress" style status so UI shows it as connected (not dialing/queued).
+        contact_status = campaign.setdefault("contact_status", {})
+        call_sids = campaign.setdefault("call_sids", {})
+        contact_status[phone] = "in-progress"
+        call_sids[phone] = call_sid
+
+        # Notify UI immediately that this answered call will connect
+        await broadcast_to_agent(agent_name, {
             "type": "customer_connected",
             "phone": phone,
             "call_sid": call_sid,
             "queue_name": queue_name,
             "campaign": {
-                "contact_status": campaign.get("contact_status", {}) if campaign else {}
+                "contact_status": campaign.get("contact_status", {})
             }
         })
 

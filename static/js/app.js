@@ -308,9 +308,7 @@ function handleWebSocketMessage(data) {
             break;
             
         case 'auto_dial_next':
-            // Call failed without connecting - auto-dial next batch
-            log(`${data.reason} - dialing next batch...`, 'info');
-            // setTimeout(() => dialNextBatch(), 1000); // Disabled automatic dialing
+            // Deprecated: auto-dial removed. Dialing only happens on explicit user action.
             break;
             
         case 'campaign_ended':
@@ -445,8 +443,25 @@ function setupDeviceHandlers() {
 function setupCallHandlers(call) {
     currentCall = call;
 
+    async function sendAgentCallState(inCall) {
+        if (!agentName) return;
+        try {
+            await fetch(`/api/agent/${encodeURIComponent(agentName)}/call-state`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    in_call: inCall,
+                    phone: currentConnectedPhone || null
+                })
+            });
+        } catch (e) {
+            console.error('Failed to update agent call state', e);
+        }
+    }
+
     call.on('accept', function() {
         log('Connected to call from queue!', 'success');
+        sendAgentCallState(true);
         const message = currentConnectedPhone ? `On call with ${currentConnectedPhone}` : 'On call';
         updateStatus('on-call', message);
         if (muteBtn) muteBtn.style.display = 'inline-block';
@@ -454,6 +469,7 @@ function setupCallHandlers(call) {
 
     call.on('disconnect', function() {
         log('Disconnected from call');
+        sendAgentCallState(false);
         currentCall = null;
         if (muteBtn) muteBtn.style.display = 'none';
         updateStatus('ready', 'Ready for next call');
@@ -461,6 +477,7 @@ function setupCallHandlers(call) {
 
     call.on('cancel', function() {
         log('Call cancelled');
+        sendAgentCallState(false);
         currentCall = null;
     });
 
@@ -494,18 +511,20 @@ function isTerminalContactStatus(status) {
         'no-answer',
         'failed',
         'canceled',
+        'answered_disconnected_by_system',
         'ended',
         'voicemail'
     ].includes(status);
 }
 
 function markAnsweredIfApplicable(phone, status) {
-    if (['queued', 'connected', 'in-progress', 'answered'].includes(status)) {
+    if (['queued', 'connected', 'in-progress', 'answered', 'answered_disconnected_by_system'].includes(status)) {
         answeredPhones.add(phone);
     }
 }
 
 function formatOutcome(phone, terminalStatus) {
+    if (terminalStatus === 'answered_disconnected_by_system') return '🚫 Answered but disconnected (agent busy)';
     if (answeredPhones.has(phone)) return '✅ Answered';
     if (terminalStatus === 'busy') return '⛔ Busy / Rejected';
     if (terminalStatus === 'no-answer') return '⚪ No Answer';
@@ -688,6 +707,7 @@ function formatStatus(status) {
         'no-answer': '⚪ No Answer',
         'failed': '❌ Failed',
         'canceled': '⚪ Cancelled',
+        'answered_disconnected_by_system': '🚫 Answered - Disconnected (no agent)',
         'voicemail': '📧 Voicemail',
         'ended': '🏁 Campaign Ended'
     };

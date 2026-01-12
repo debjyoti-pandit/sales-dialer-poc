@@ -1,5 +1,5 @@
 """Campaign API routes"""
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Body
 from app.models.campaign import DispositionData
 from app.services.campaign_service import campaign_service
 from app.services.contact_list_service import contact_list_service
@@ -107,6 +107,29 @@ async def dial_next_batch(agent_name: str):
         }
     else:
         return {"status": "no_more_contacts", "phones": [], "next_batch": []}
+
+
+@router.post("/agent/{agent_name}/call-state")
+async def set_agent_call_state(agent_name: str, payload: dict = Body(...)):
+    """Set agent busy/idle state (used to prevent double-answered calls)."""
+    agent = agents.get(agent_name)
+    if not agent:
+        return {"status": "no_agent"}
+
+    in_call = bool(payload.get("in_call", False))
+    phone = payload.get("phone")
+
+    agent["in_call"] = in_call
+    if in_call:
+        if phone:
+            agent["connected_phone"] = phone
+    else:
+        # Clear any reserved/busy markers so new answered calls can be accepted
+        agent.pop("connected_phone", None)
+        agent.pop("call_slot_reserved", None)
+        agent.pop("reserved_phone", None)
+
+    return {"status": "ok", "in_call": in_call}
 
 
 @router.post("/agent/{agent_name}/end")
