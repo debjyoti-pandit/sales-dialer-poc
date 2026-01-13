@@ -13,6 +13,11 @@ class ContactListService:
         self.campaigns_file_path = campaigns_file_path
         self._campaigns_cache = None
         self._last_modified = None
+
+    def refresh(self) -> None:
+        """Force-refresh campaigns cache from disk on next access."""
+        self._campaigns_cache = None
+        self._last_modified = None
     
     def get_campaigns(self) -> List[Dict]:
         """Load campaigns from JSON file, caching for performance"""

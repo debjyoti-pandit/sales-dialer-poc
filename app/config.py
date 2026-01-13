@@ -16,6 +16,10 @@ TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 # Base URL for TwiML webhooks
 BASE_URL = os.getenv("BASE_URL", "https://sales-dialer-poc.jp.ngrok.io")
 
+# Optional: Twilio Media Streams websocket target for live transcription
+# Example: wss://sales-dialer-transcription-service.jp.ngrok.io/twilio/media
+TRANSCRIPTION_STREAM_WSS_URL = os.getenv("TRANSCRIPTION_STREAM_WSS_URL", "")
+
 # Conference settings
 CONFERENCE_NAME = "SalesDialerConference"
 

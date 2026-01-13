@@ -336,6 +336,12 @@ window.startCampaign = async function() {
         agentNameModal.style.display = 'flex';
         return;
     }
+
+    // If user ended a previous campaign, we may have closed the websocket.
+    // Reconnect so status updates work for the new campaign.
+    if (!websocket || websocket.readyState !== WebSocket.OPEN) {
+        connectWebSocket(agentName);
+    }
     
     startCampaignBtn.disabled = true;
     updateStatus('connecting', 'Starting campaign...');
@@ -377,6 +383,7 @@ window.startCampaign = async function() {
         // Show/hide buttons
         startCampaignBtn.style.display = 'none';
         endCampaignBtn.style.display = 'inline-block';
+        endCampaignBtn.disabled = false;
 
     } catch (error) {
         console.error('Campaign error:', error);
@@ -753,6 +760,12 @@ window.endCampaign = async function() {
     answeredPhones = new Set();
     historyCampaignId = null;
     renderCallHistory();
+    
+    // Hide contacts panel completely (same as initial load)
+    if (contactListContainer) contactListContainer.style.display = 'none';
+    if (contactList) contactList.innerHTML = '';
+    if (contactCount) contactCount.textContent = '0';
+
     currentCall = null;
     device = null;
     isMuted = false;
@@ -760,6 +773,7 @@ window.endCampaign = async function() {
     startCampaignBtn.disabled = false;
     startCampaignBtn.style.display = 'inline-block';
     endCampaignBtn.style.display = 'none';
+    endCampaignBtn.disabled = false;
     if (muteBtn) {
         muteBtn.style.display = 'none';
         muteBtn.classList.remove('muted');

@@ -1,8 +1,8 @@
 """Twilio Voice webhook routes"""
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
-from twilio.twiml.voice_response import VoiceResponse, Dial, Enqueue
-from app.config import TWILIO_PHONE_NUMBER, QUEUE_HOLD_MUSIC_URL, BASE_URL
+from twilio.twiml.voice_response import VoiceResponse, Dial, Enqueue, Start
+from app.config import TWILIO_PHONE_NUMBER, QUEUE_HOLD_MUSIC_URL, BASE_URL, TRANSCRIPTION_STREAM_WSS_URL
 from app.services.campaign_service import campaign_service
 from app.services.call_queue_service import call_queue_service
 from app.services.twilio_service import twilio_service
@@ -360,6 +360,15 @@ async def contact_to_queue(request: Request, campaign_id: str = None, phone: str
 
     # Connect customer to the agent queue where the agent is waiting
     if queue_name:
+        # Optional: Start Twilio Media Stream -> transcription service
+        # This streams the contact's audio ("inbound" from contact to Twilio) to your WS endpoint.
+        if TRANSCRIPTION_STREAM_WSS_URL:
+            start = Start()
+            # Twilio expects: inbound_track | outbound_track | both_tracks
+            start.stream(url=TRANSCRIPTION_STREAM_WSS_URL, track="inbound_track")
+            response.append(start)
+            logger.info(f"Starting media stream to {TRANSCRIPTION_STREAM_WSS_URL}")
+
         dial = Dial()
         dial.queue(queue_name)  # Connect to queue to be answered by waiting agents
         response.append(dial)

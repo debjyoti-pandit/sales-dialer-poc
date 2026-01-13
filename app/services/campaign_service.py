@@ -15,6 +15,40 @@ executor = ThreadPoolExecutor(max_workers=10)
 class CampaignService:
     """Service for managing campaigns"""
 
+    def refresh_campaign_contacts(self, campaign_list_id: int) -> dict:
+        """
+        Refresh in-memory contact-related state for a campaign list.
+
+        This mimics a "server restart" for contact selection logic by:
+        - forcing a reload of campaigns.json (contact list source)
+        - clearing per-campaign reservations for the selected list
+        - removing selected list's phones from global dialed tracking
+        """
+        # Reload campaigns.json on next access
+        contact_list_service.refresh()
+
+        # Clear reservations for this campaign list
+        reservations_cleared = 0
+        reservations = campaign_contact_reservations.get(int(campaign_list_id))
+        if reservations:
+            reservations_cleared = len(reservations)
+            campaign_contact_reservations.pop(int(campaign_list_id), None)
+
+        # Remove "dialed" markers only for phones in this campaign list
+        contacts = contact_list_service.get_contacts(campaign_id=campaign_list_id)
+        dialed_cleared = 0
+        for phone in contacts:
+            if phone in dialed_contacts:
+                dialed_contacts.pop(phone, None)
+                dialed_cleared += 1
+
+        return {
+            "campaign_list_id": int(campaign_list_id),
+            "reservations_cleared": reservations_cleared,
+            "dialed_contacts_cleared": dialed_cleared,
+            "contacts_count": len(contacts),
+        }
+
     def start_agent_campaign(self, agent_name: str, identity: str, campaign_list_id: int = None, batch_size: int = BATCH_DIAL_COUNT) -> dict:
         """Start a campaign for an agent - connect agent to queue first, then dial contacts"""
         campaign_id = uuid.uuid4().hex[:8]

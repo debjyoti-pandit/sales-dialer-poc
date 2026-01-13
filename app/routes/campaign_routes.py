@@ -33,6 +33,16 @@ async def start_campaign(
 ):
     """Start campaign for an agent - add to queue and dial batch of contacts"""
     
+    # Refresh contact list + in-memory contact state (mimics server restart)
+    refreshed = campaign_service.refresh_campaign_contacts(campaign_list_id)
+    logger.info(
+        "Refreshed contact state for campaign_list_id=%s (contacts=%s, dialed_cleared=%s, reservations_cleared=%s)",
+        refreshed["campaign_list_id"],
+        refreshed["contacts_count"],
+        refreshed["dialed_contacts_cleared"],
+        refreshed["reservations_cleared"],
+    )
+
     token, identity = twilio_service.generate_token()
     if not token:
         raise HTTPException(status_code=500, detail="Twilio credentials not configured.")
