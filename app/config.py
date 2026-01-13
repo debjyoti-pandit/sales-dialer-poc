@@ -20,6 +20,10 @@ BASE_URL = os.getenv("BASE_URL", "https://sales-dialer-poc.jp.ngrok.io")
 # Example: wss://sales-dialer-transcription-service.jp.ngrok.io/twilio/media
 TRANSCRIPTION_STREAM_WSS_URL = os.getenv("TRANSCRIPTION_STREAM_WSS_URL", "")
 
+# Optional: Where transcription service should push transcript events (server -> server).
+# Example: wss://sales-dialer-poc.jp.ngrok.io/ws/transcripts?token=...
+TRANSCRIPTION_INGEST_WS_URL = os.getenv("TRANSCRIPTION_INGEST_WS_URL", "")
+
 # Conference settings
 CONFERENCE_NAME = "SalesDialerConference"
 

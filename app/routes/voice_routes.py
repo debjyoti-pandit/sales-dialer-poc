@@ -1,4 +1,5 @@
 """Twilio Voice webhook routes"""
+# pylint: disable=import-error
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from twilio.twiml.voice_response import VoiceResponse, Dial, Enqueue, Start
@@ -365,7 +366,11 @@ async def contact_to_queue(request: Request, campaign_id: str = None, phone: str
         if TRANSCRIPTION_STREAM_WSS_URL:
             start = Start()
             # Twilio expects: inbound_track | outbound_track | both_tracks
-            start.stream(url=TRANSCRIPTION_STREAM_WSS_URL, track="inbound_track")
+            stream = start.stream(url=TRANSCRIPTION_STREAM_WSS_URL, track="inbound_track")
+            # Include identifiers so the transcription service can route transcript updates
+            # back to the correct agent/call in real-time.
+            stream.parameter(name="agent_name", value=agent_name or "")
+            stream.parameter(name="phone", value=phone or "")
             response.append(start)
             logger.info(f"Starting media stream to {TRANSCRIPTION_STREAM_WSS_URL}")
 

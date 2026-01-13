@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routes import campaign_routes, voice_routes, static_routes
-from app.websocket.routes import websocket_endpoint
+from app.websocket.routes import websocket_endpoint, transcript_ingest_endpoint
 
 app = FastAPI(title="Sales Dialer POC")
 
@@ -21,6 +21,7 @@ app.include_router(voice_routes.router)
 app.include_router(static_routes.router)
 
 # WebSocket endpoint
+app.websocket("/ws/transcripts")(transcript_ingest_endpoint)
 app.websocket("/ws/{agent_name}")(websocket_endpoint)
 
 

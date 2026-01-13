@@ -13,6 +13,9 @@ let visibleContacts = [];
 let callHistoryByPhone = {};
 let answeredPhones = new Set();
 let historyCampaignId = null;
+let liveTranscriptByPhone = {};
+let lastTranscriptLogByPhone = {};
+let lastTranscriptLogAtByPhone = {};
 
 // DOM Elements
 let statusIndicator, statusText, agentInfo, agentNameDisplay, startCampaignBtn, endCampaignBtn, muteBtn;
@@ -306,6 +309,31 @@ function handleWebSocketMessage(data) {
             updateContactStatus(data.contact_status);
             showDispositionModal(data.phone);
             break;
+
+        case 'live_transcript': {
+            // Live transcription for an active call (keyed by phone + call_sid).
+            const phone = data.phone;
+            const transcript = (data.transcript || '').trim();
+            if (!phone) break;
+            liveTranscriptByPhone[phone] = transcript;
+
+            // Also print to on-screen Activity Log (deduped, no throttle for "instant").
+            const now = Date.now();
+            const lastText = lastTranscriptLogByPhone[phone] || '';
+            const lastAt = lastTranscriptLogAtByPhone[phone] || 0;
+            if (transcript && transcript !== lastText) {
+                lastTranscriptLogByPhone[phone] = transcript;
+                lastTranscriptLogAtByPhone[phone] = now;
+                log(`🗣️ ${phone}: ${transcript}`, 'info');
+            }
+
+            // Update DOM in-place if the row is currently rendered.
+            const row = document.querySelector(`.contact-item[data-phone="${phone}"] .contact-transcript`);
+            if (row) {
+                row.textContent = transcript || '';
+            }
+            break;
+        }
             
         case 'auto_dial_next':
             // Deprecated: auto-dial removed. Dialing only happens on explicit user action.
@@ -592,9 +620,14 @@ function renderContacts() {
 
     contactList.innerHTML = visibleContacts.map((phone) => {
         const status = statusMap[phone] || 'pending';
+        const transcript = (liveTranscriptByPhone[phone] || '').trim();
+        const showTranscript = transcript && (status === 'in-progress' || status === 'connected' || status === 'answered');
         return `
             <div class="contact-item ${status}" data-phone="${phone}">
-                <span class="contact-number">${phone}</span>
+                <div class="contact-left">
+                    <div class="contact-number">${phone}</div>
+                    <div class="contact-transcript">${showTranscript ? transcript : ''}</div>
+                </div>
                 <span class="contact-status ${status}">${formatStatus(status)}</span>
             </div>
         `;
@@ -655,6 +688,9 @@ function updateContactStatus(contactStatus) {
     (campaign.contacts || []).forEach((phone) => {
         const status = (contactStatus || {})[phone] || 'pending';
         markAnsweredIfApplicable(phone, status);
+        if (isTerminalContactStatus(status)) {
+            delete liveTranscriptByPhone[phone];
+        }
 
         if (isTerminalContactStatus(status)) {
             const prev = prevStatus[phone] || 'pending';
@@ -759,6 +795,9 @@ window.endCampaign = async function() {
     callHistoryByPhone = {};
     answeredPhones = new Set();
     historyCampaignId = null;
+    liveTranscriptByPhone = {};
+    lastTranscriptLogByPhone = {};
+    lastTranscriptLogAtByPhone = {};
     renderCallHistory();
     
     // Hide contacts panel completely (same as initial load)
