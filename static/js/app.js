@@ -327,11 +327,20 @@ function handleWebSocketMessage(data) {
                 log(`🗣️ ${phone}: ${transcript}`, 'info');
             }
 
-            // Update DOM in-place if the row is currently rendered.
-            const row = document.querySelector(`.contact-item[data-phone="${phone}"] .contact-transcript`);
-            if (row) {
-                row.textContent = transcript || '';
+            // Update DOM in-place if the rows are currently rendered.
+            // If the call already moved to a terminal state, keep showing transcript
+            // in Call Outcomes as well.
+            if (callHistoryByPhone[phone] && isTerminalContactStatus(callHistoryByPhone[phone].status)) {
+                callHistoryByPhone[phone].transcript = transcript;
+                callHistoryByPhone[phone].updatedAt = now;
             }
+
+            // Escape characters that would break the CSS attribute selector.
+            const safePhone = String(phone).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            const rows = document.querySelectorAll(`.contact-item[data-phone="${safePhone}"] .contact-transcript`);
+            rows.forEach((el) => {
+                el.textContent = transcript || '';
+            });
             break;
         }
             
@@ -547,6 +556,7 @@ function isTerminalContactStatus(status) {
         'failed',
         'canceled',
         'answered_disconnected_by_system',
+        'dropped_by_system',
         'ended',
         'voicemail'
     ].includes(status);
@@ -560,12 +570,12 @@ function markAnsweredIfApplicable(phone, status) {
 
 function formatOutcome(phone, terminalStatus) {
     if (terminalStatus === 'answered_disconnected_by_system') return '🚫 Answered but disconnected (agent busy)';
+    if (terminalStatus === 'voicemail') return '📧 Voicemail';
     if (answeredPhones.has(phone)) return '✅ Answered';
     if (terminalStatus === 'busy') return '⛔ Busy / Rejected';
     if (terminalStatus === 'no-answer') return '⚪ No Answer';
     if (terminalStatus === 'failed') return '❌ Failed';
     if (terminalStatus === 'canceled') return '⚪ Canceled';
-    if (terminalStatus === 'voicemail') return '📧 Voicemail';
     if (terminalStatus === 'ended') return '🏁 Ended';
     if (terminalStatus === 'completed') return '✓ Completed';
     return formatStatus(terminalStatus);
@@ -593,8 +603,13 @@ function renderCallHistory() {
 
     callHistoryList.innerHTML = entries.map((e) => `
         <div class="contact-item ${e.status}" data-phone="${e.phone}">
-            <span class="contact-number">${e.phone}</span>
-            <span class="contact-status ${e.status}">${e.outcome}</span>
+            <div class="contact-left">
+                <div class="contact-number">${e.phone}</div>
+                <div class="contact-transcript">${(e.transcript || '').trim()}</div>
+            </div>
+            <div class="contact-right">
+                <span class="contact-status ${e.status}">${e.outcome}</span>
+            </div>
         </div>
     `).join('');
 }
@@ -621,14 +636,24 @@ function renderContacts() {
     contactList.innerHTML = visibleContacts.map((phone) => {
         const status = statusMap[phone] || 'pending';
         const transcript = (liveTranscriptByPhone[phone] || '').trim();
-        const showTranscript = transcript && (status === 'in-progress' || status === 'connected' || status === 'answered');
+        // Show transcript whenever we have text and the contact is still active.
+        // Previously we only showed for a few statuses; since `renderContacts()` runs
+        // on every status update, transcripts were repeatedly cleared during common
+        // states like dialing/ringing/queued, making it look like transcription
+        // "doesn't show" in the UI.
+        // Note: transcript may arrive before we get a non-"pending" status update.
+        const showTranscript = !!transcript && !isTerminalContactStatus(status);
+        const showConnect = (status === 'amd_unknown');
         return `
             <div class="contact-item ${status}" data-phone="${phone}">
                 <div class="contact-left">
                     <div class="contact-number">${phone}</div>
                     <div class="contact-transcript">${showTranscript ? transcript : ''}</div>
                 </div>
-                <span class="contact-status ${status}">${formatStatus(status)}</span>
+                <div class="contact-right">
+                    ${showConnect ? `<button class="connect-btn" onclick="connectAnsweredCall('${phone}')">Connect</button>` : ''}
+                    <span class="contact-status ${status}">${formatStatus(status)}</span>
+                </div>
             </div>
         `;
     }).join('');
@@ -687,10 +712,12 @@ function updateContactStatus(contactStatus) {
     
     (campaign.contacts || []).forEach((phone) => {
         const status = (contactStatus || {})[phone] || 'pending';
-        markAnsweredIfApplicable(phone, status);
-        if (isTerminalContactStatus(status)) {
-            delete liveTranscriptByPhone[phone];
+        const currentTranscript = (liveTranscriptByPhone[phone] || '').trim();
+        // If the call ended as voicemail, it should NOT count as "answered" in history.
+        if (status === 'voicemail') {
+            answeredPhones.delete(phone);
         }
+        markAnsweredIfApplicable(phone, status);
 
         if (isTerminalContactStatus(status)) {
             const prev = prevStatus[phone] || 'pending';
@@ -700,9 +727,12 @@ function updateContactStatus(contactStatus) {
                     phone,
                     status,
                     outcome: formatOutcome(phone, status),
+                    transcript: currentTranscript,
                     updatedAt: Date.now()
                 };
             }
+            // We keep the transcript in history; clear live buffer to avoid unbounded growth.
+            delete liveTranscriptByPhone[phone];
         }
         if (status === 'in-progress' || status === 'connected') {
             connectedCount++;
@@ -745,6 +775,9 @@ function formatStatus(status) {
         'connected': '🎯 Connected',
         'in-progress': '🟢 On Call',
         'answered': '🟢 On Call',
+        'amd_listening': '🕵️ AMD listening (silent)',
+        'amd_unknown': '❔ AMD unknown (click Connect)',
+        'dropped_by_system': '🚫 Dropped',
         'completed': '✓ Call Ended',
         'busy': '🔴 Busy',
         'no-answer': '⚪ No Answer',
@@ -756,6 +789,30 @@ function formatStatus(status) {
     };
     return statusMap[status] || status;
 }
+
+window.connectAnsweredCall = async function(phone) {
+    if (!agentName) {
+        log('No agent name', 'error');
+        return;
+    }
+    if (!phone) return;
+    try {
+        log(`Connecting ${phone}...`, 'info');
+        const resp = await fetch(`/api/agent/${encodeURIComponent(agentName)}/connect-call`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone })
+        });
+        if (!resp.ok) {
+            const txt = await resp.text().catch(() => '');
+            throw new Error(`connect failed (${resp.status}) ${txt}`);
+        }
+        log(`✅ Connect requested for ${phone}`, 'success');
+    } catch (e) {
+        console.error(e);
+        log(`Connect error: ${e.message}`, 'error');
+    }
+};
 
 // ============== End Campaign ==============
 

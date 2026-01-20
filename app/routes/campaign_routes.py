@@ -4,6 +4,7 @@ from app.models.campaign import DispositionData
 from app.services.campaign_service import campaign_service
 from app.services.contact_list_service import contact_list_service
 from app.services.twilio_service import twilio_service
+from app.services.call_queue_service import call_queue_service
 from app.storage import agents, campaigns
 from app.logger import logger
 
@@ -140,6 +141,31 @@ async def set_agent_call_state(agent_name: str, payload: dict = Body(...)):
         agent.pop("reserved_phone", None)
 
     return {"status": "ok", "in_call": in_call}
+
+
+@router.post("/agent/{agent_name}/connect-call")
+async def connect_call(agent_name: str, payload: dict = Body(...)):
+    """
+    Manual connect: used after 3s when AMD is still UNKNOWN.
+    Connect the selected answered call and drop all others.
+    """
+    phone = (payload.get("phone") or "").strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail="Missing phone")
+
+    agent = agents.get(agent_name) or {}
+    campaign_id = agent.get("campaign_id")
+    if not campaign_id or campaign_id not in campaigns:
+        raise HTTPException(status_code=404, detail="No active campaign")
+
+    await call_queue_service.connect_selected_call(
+        agent_name=agent_name,
+        campaign_id=campaign_id,
+        selected_phone=phone,
+        reason="manual_connect",
+        amd={"decision": "UNKNOWN", "confidence": 0.30, "decided": False},
+    )
+    return {"status": "ok"}
 
 
 @router.post("/agent/{agent_name}/end")

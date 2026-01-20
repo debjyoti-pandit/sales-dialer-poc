@@ -90,6 +90,23 @@ class TwilioService:
             logger.error(f"Error hanging up call {call_sid}: {e}")
             return False
 
+    def redirect_call(self, call_sid: str, twiml_url: str) -> bool:
+        """
+        Redirect an in-progress call to new TwiML (server-side control).
+        Useful for AMD gating: keep caller in silence, then bridge to agent queue.
+        """
+        if not self.client:
+            return False
+        if not call_sid or not twiml_url:
+            return False
+        try:
+            self.client.calls(call_sid).update(url=twiml_url, method="POST")
+            logger.info(f"Redirected call {call_sid} -> {twiml_url}")
+            return True
+        except Exception as e:
+            logger.error(f"Error redirecting call {call_sid}: {e}")
+            return False
+
     def dequeue_call(self, queue_name: str, call_sid: str, dequeue_url: str):
         """Dequeue a call from a Twilio queue and redirect it"""
         if not self.client:

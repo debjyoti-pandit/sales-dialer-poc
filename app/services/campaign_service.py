@@ -258,7 +258,11 @@ class CampaignService:
         if phone in campaign["contact_status"]:
             # Don't overwrite a backend-forced outcome (e.g. answered but we disconnected
             # because no agent was available). Twilio will still send "completed" later.
-            if campaign["contact_status"].get(phone) == "answered_disconnected_by_system":
+            if campaign["contact_status"].get(phone) in (
+                "answered_disconnected_by_system",
+                "voicemail",
+                "dropped_by_system",
+            ):
                 return
 
             campaign["contact_status"][phone] = call_status

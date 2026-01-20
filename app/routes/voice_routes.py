@@ -1,8 +1,10 @@
 """Twilio Voice webhook routes"""
 # pylint: disable=import-error
+import time
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from twilio.twiml.voice_response import VoiceResponse, Dial, Enqueue, Start
+from typing import Any, cast
 from app.config import TWILIO_PHONE_NUMBER, QUEUE_HOLD_MUSIC_URL, BASE_URL, TRANSCRIPTION_STREAM_WSS_URL
 from app.services.campaign_service import campaign_service
 from app.services.call_queue_service import call_queue_service
@@ -182,7 +184,7 @@ async def voice_amd_status(request: Request, campaign_id: str = None, phone: str
 
     logger.call(phone, f"AMD result: {answered_by} - {machine_detection_status}")
 
-    # Broadcast AMD result to frontend for logging only
+    # Broadcast AMD result to frontend for visibility.
     if campaign_id and agent_name:
         await broadcast_to_agent(agent_name, {
             "type": "amd_result",
@@ -192,6 +194,9 @@ async def voice_amd_status(request: Request, campaign_id: str = None, phone: str
             "machine_detection_status": machine_detection_status,
             "detection_result": detection_result
         })
+
+    # Just log Twilio AMD results - we ignore them and let the transcription service handle AMD
+    logger.call(phone, f"Twilio AMD result (ignored): {answered_by} - {machine_detection_status}")
 
     # Return JSON response with proper Content-Type
     return JSONResponse(content={"status": "ok"})
@@ -225,7 +230,7 @@ async def voice_status(request: Request, campaign_id: str = None, phone: str = N
 
             # If backend already marked this as "answered but dropped", do not overwrite
             # it with Twilio's later terminal statuses like "completed".
-            if previous_status == "answered_disconnected_by_system":
+            if previous_status in ("answered_disconnected_by_system", "voicemail", "dropped_by_system"):
                 return JSONResponse(content={"status": "ok"})
 
         campaign_service.update_call_status(campaign_id, phone, call_status, call_sid)
@@ -306,80 +311,221 @@ async def contact_to_queue(request: Request, campaign_id: str = None, phone: str
     if not agent_name and campaign:
         agent_name = campaign.get("agent_name")
 
-    # Campaign-level single-slot reservation:
-    # when dialing multiple numbers, if more than one answers, keep the first and disconnect the rest.
+    # AMD gating:
+    # - customer stays on a HOLD queue first (transcription runs)
+    # - backend connects to agent queue only after AMD says HUMAN, or manual connect, or 10s timeout
     if campaign and agent_name and phone and call_sid:
-        reserved_phone = campaign.get("reserved_phone")
-        slot_reserved = bool(campaign.get("call_slot_reserved"))
-
-        if slot_reserved and reserved_phone and reserved_phone != phone:
-            # Contact answered, but agent slot already taken -> disconnect from our end
-            contact_status = campaign.setdefault("contact_status", {})
-            call_sids = campaign.setdefault("call_sids", {})
-            contact_status[phone] = "answered_disconnected_by_system"
-            call_sids[phone] = call_sid
-
-            await broadcast_to_agent(agent_name, {
-                "type": "status_update",
-                "phone": phone,
-                "status": "answered_disconnected_by_system",
-                "contact_status": campaign.get("contact_status", {})
-            })
-
-            logger.call(phone, f"Slot taken ({reserved_phone}) - disconnecting answered call {call_sid}")
-            twilio_service.hangup_call(call_sid)
-
-            hangup_resp = VoiceResponse()
-            hangup_resp.say("Sorry, no agents are available. Goodbye.")
-            hangup_resp.hangup()
-            return create_twiml_response(hangup_resp)
-
-        # Reserve slot for the first answered call
-        campaign.update({
-            "call_slot_reserved": True,
-            "reserved_phone": phone,
-            "connected_phone": phone,
-        })
-
-        # Contact answered and is being bridged to the agent queue.
-        # Use an "in-progress" style status so UI shows it as connected (not dialing/queued).
+        assert isinstance(campaign, dict)
         contact_status = campaign.setdefault("contact_status", {})
         call_sids = campaign.setdefault("call_sids", {})
-        contact_status[phone] = "in-progress"
+        contact_status[phone] = "amd_listening"
         call_sids[phone] = call_sid
 
-        # Notify UI immediately that this answered call will connect
+        # Start timers (3s -> amd_unknown, 10s -> auto connect topmost)
+        await call_queue_service.start_amd_gate(
+            campaign_id=campaign_id,
+            agent_name=agent_name,
+            phone=phone,
+            call_sid=call_sid,
+            answered_at_ms=int(time.time() * 1000),
+        )
+
+    # Start transcription stream immediately (so AMD can run before connecting agent)
+    if TRANSCRIPTION_STREAM_WSS_URL:
+        start = Start()
+        stream = start.stream(url=TRANSCRIPTION_STREAM_WSS_URL, track="inbound_track")
+        stream.parameter(name="agent_name", value=agent_name or "")
+        stream.parameter(name="phone", value=phone or "")
+        response.append(start)
+        logger.info(f"Starting media stream to {TRANSCRIPTION_STREAM_WSS_URL}")
+
+    # IMPORTANT: Do NOT play hold music while AMD runs.
+    # Keep the customer in silence while we run AMD.
+    #
+    # Fail-safe: after 10s, Twilio will hit our /amd-timeout endpoint via <Redirect>.
+    # If AMD decides earlier (human) or agent manually connects, backend will update the
+    # live call's URL and this pause path will be abandoned.
+    response.pause(length=10)
+    encoded_phone = quote(phone, safe='') if phone else ''
+    encoded_campaign = quote(campaign_id, safe='') if campaign_id else ''
+    encoded_agent = quote(agent_name, safe='') if agent_name else ''
+    encoded_queue = quote(queue_name or "", safe='')
+    timeout_url = f"{BASE_URL}/api/voice/amd-timeout?campaign_id={encoded_campaign}&phone={encoded_phone}&agent_name={encoded_agent}&queue_name={encoded_queue}"
+    response.redirect(timeout_url, method="POST")
+
+    return create_twiml_response(response)
+
+
+@router.post("/amd-bridge")
+async def amd_bridge(request: Request, campaign_id: str = None, phone: str = None, queue_name: str = None, agent_name: str = None, reason: str = None):
+    """
+    TwiML endpoint used when we DEQUEUE a customer from the AMD hold queue
+    into the agent queue.
+    """
+    _ = request
+    response = VoiceResponse()
+
+    # Normalize phone number
+    if phone:
+        phone = phone.strip()
+        if not phone.startswith('+'):
+            phone = '+' + phone
+
+    campaign = campaign_service.get_campaign(campaign_id) if campaign_id else None
+    if isinstance(campaign, dict) and agent_name and phone:
+        # Help static analyzers: we've guarded it's a mutable dict.
+        campaign_dict = cast(dict[str, Any], campaign)
+
+        # Check if already connected to prevent duplicate processing
+        if campaign_dict.get("connected_phone") == phone:
+            logger.warning(f"Call {phone} already connected in amd_bridge, skipping duplicate processing (reason: {reason})")
+            # Still return valid TwiML to connect to queue
+            if queue_name:
+                dial = Dial()
+                dial.queue(queue_name)
+                response.append(dial)
+            return create_twiml_response(response)
+
+        # Mark as connected now
+        # pylint: disable=unsupported-assignment-operation
+        campaign_dict.setdefault("contact_status", {})[phone] = "in-progress"
+        campaign_dict["connected_phone"] = phone
+        campaign_dict["status"] = "connected"
+        # pylint: enable=unsupported-assignment-operation
+
         await broadcast_to_agent(agent_name, {
             "type": "customer_connected",
             "phone": phone,
-            "call_sid": call_sid,
+            "call_sid": (campaign_dict.get("call_sids", {}) or {}).get(phone, ""),
             "queue_name": queue_name,
-            "campaign": {
-                "contact_status": campaign.get("contact_status", {})
-            }
+            "reason": reason or "",
+            "campaign": {"contact_status": campaign_dict.get("contact_status", {})},
         })
 
-    # Connect customer to the agent queue where the agent is waiting
-    if queue_name:
-        # Optional: Start Twilio Media Stream -> transcription service
-        # This streams the contact's audio ("inbound" from contact to Twilio) to your WS endpoint.
-        if TRANSCRIPTION_STREAM_WSS_URL:
-            start = Start()
-            # Twilio expects: inbound_track | outbound_track | both_tracks
-            stream = start.stream(url=TRANSCRIPTION_STREAM_WSS_URL, track="inbound_track")
-            # Include identifiers so the transcription service can route transcript updates
-            # back to the correct agent/call in real-time.
-            stream.parameter(name="agent_name", value=agent_name or "")
-            stream.parameter(name="phone", value=phone or "")
-            response.append(start)
-            logger.info(f"Starting media stream to {TRANSCRIPTION_STREAM_WSS_URL}")
+    # IMPORTANT: Redirecting the call can stop an existing Media Stream.
+    # Restart transcription streaming here so transcript continues after connect.
+    if TRANSCRIPTION_STREAM_WSS_URL:
+        start = Start()
+        stream = start.stream(url=TRANSCRIPTION_STREAM_WSS_URL, track="inbound_track")
+        stream.parameter(name="agent_name", value=agent_name or "")
+        stream.parameter(name="phone", value=phone or "")
+        # Best-effort: include call_sid as a parameter (transcription service may ignore it).
+        if campaign and isinstance(campaign, dict):
+            stream.parameter(name="call_sid", value=(campaign.get("call_sids", {}) or {}).get(phone, "") or "")
+        response.append(start)
 
+    if queue_name:
         dial = Dial()
-        dial.queue(queue_name)  # Connect to queue to be answered by waiting agents
+        dial.queue(queue_name)
         response.append(dial)
     else:
         response.say("Queue not specified")
+    return create_twiml_response(response)
 
+
+@router.post("/amd-timeout")
+async def amd_timeout(
+    request: Request,
+    campaign_id: str = None,
+    phone: str = None,
+    queue_name: str = None,
+    agent_name: str = None,
+):
+    """
+    TwiML endpoint hit after 10 seconds (Pause+Redirect) while AMD is running.
+
+    - If a call is already connected, hang up this call.
+    - Otherwise, connect the topmost (earliest-answered) pending call and hang up the rest.
+    """
+    response = VoiceResponse()
+    form_data = await request.form()
+    call_sid = form_data.get("CallSid", "")
+
+    # Normalize phone number
+    if phone:
+        phone = phone.strip()
+        if not phone.startswith('+'):
+            phone = '+' + phone
+
+    campaign = campaign_service.get_campaign(campaign_id) if campaign_id else None
+    if not isinstance(campaign, dict):
+        response.hangup()
+        return create_twiml_response(response)
+    # Help static analyzers: we've guarded it's a mutable dict.
+    campaign_dict = cast(dict[str, Any], campaign)
+
+    # Resolve agent_name/queue_name if missing
+    if not agent_name:
+        agent_name = campaign_dict.get("agent_name")
+    if not queue_name:
+        queue_name = campaign_dict.get("queue_name")
+
+    if not agent_name or not phone or not queue_name:
+        response.hangup()
+        return create_twiml_response(response)
+
+    # If already connected, this call is not needed.
+    if campaign_dict.get("connected_phone"):
+        if campaign_dict.get("connected_phone") != phone:
+            campaign_dict.setdefault("contact_status", {})[phone] = "dropped_by_system"
+        response.hangup()
+        return create_twiml_response(response)
+
+    cs = campaign_dict.get("contact_status", {}) or {}
+    answered_at = campaign_dict.get("amd_answered_at_ms", {}) or {}
+    call_sids = campaign_dict.get("call_sids", {}) or {}
+
+    pending = [p for p, st in cs.items() if st in ("amd_unknown", "amd_listening")]
+    if not pending:
+        response.hangup()
+        return create_twiml_response(response)
+
+    pending.sort(key=lambda p: int(answered_at.get(p, 0) or 0))
+    selected_phone = pending[0]
+
+    # If this callback is for a non-selected phone, drop it.
+    if selected_phone != phone:
+        cs[phone] = "dropped_by_system"
+        response.hangup()
+        return create_twiml_response(response)
+
+    # Selected: drop all other pending calls
+    for p, sid in list(call_sids.items()):
+        if p == selected_phone:
+            continue
+        st = (campaign_dict.get("contact_status", {}) or {}).get(p)
+        if st in ("dialing", "ringing", "amd_listening", "amd_unknown", "queued"):
+            twilio_service.hangup_call(sid)
+            campaign_dict.setdefault("contact_status", {})[p] = "dropped_by_system"
+
+    # Mark connected and notify UI
+    # pylint: disable=unsupported-assignment-operation
+    campaign_dict.setdefault("contact_status", {})[selected_phone] = "in-progress"
+    campaign_dict["connected_phone"] = selected_phone
+    campaign_dict["status"] = "connected"
+    # pylint: enable=unsupported-assignment-operation
+
+    await broadcast_to_agent(agent_name, {
+        "type": "customer_connected",
+        "phone": selected_phone,
+        "call_sid": call_sids.get(selected_phone, "") or call_sid,
+        "queue_name": queue_name,
+        "reason": "twiml_10s_timeout",
+        "campaign": {"contact_status": campaign_dict.get("contact_status", {})},
+    })
+
+    # Restart transcription streaming (redirect can stop previous stream)
+    if TRANSCRIPTION_STREAM_WSS_URL:
+        start = Start()
+        stream = start.stream(url=TRANSCRIPTION_STREAM_WSS_URL, track="inbound_track")
+        stream.parameter(name="agent_name", value=agent_name or "")
+        stream.parameter(name="phone", value=selected_phone or "")
+        stream.parameter(name="call_sid", value=call_sids.get(selected_phone, "") or call_sid or "")
+        response.append(start)
+
+    dial = Dial()
+    dial.queue(queue_name)
+    response.append(dial)
     return create_twiml_response(response)
 
 

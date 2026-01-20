@@ -3,6 +3,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from app.storage import active_websockets, agents, campaigns
 from app.logger import logger
 from app.websocket.manager import broadcast_to_agent
+from app.services.call_queue_service import call_queue_service
 
 
 async def websocket_endpoint(websocket: WebSocket, agent_name: str):
@@ -60,6 +61,7 @@ async def transcript_ingest_endpoint(websocket: WebSocket):
             phone = (data.get("phone") or "").strip()
             call_sid = (data.get("call_sid") or "").strip()
             transcript = (data.get("transcript") or "").strip()
+            amd = data.get("amd")
 
             if not agent_name or not transcript:
                 continue
@@ -83,5 +85,14 @@ async def transcript_ingest_endpoint(websocket: WebSocket):
                     "updated_at": data.get("updated_at"),
                 },
             )
+
+            # If transcription service attached an AMD decision, act on it immediately.
+            if amd and agent_name and phone and call_sid:
+                await call_queue_service.handle_rule_based_amd(
+                    agent_name=agent_name,
+                    phone=phone,
+                    call_sid=call_sid,
+                    amd=amd if isinstance(amd, dict) else {},
+                )
     except WebSocketDisconnect:
         logger.info("Transcript ingest WebSocket disconnected")
