@@ -333,9 +333,10 @@ async def contact_to_queue(request: Request, campaign_id: str = None, phone: str
     # Start transcription stream immediately (so AMD can run before connecting agent)
     if TRANSCRIPTION_STREAM_WSS_URL:
         start = Start()
-        stream = start.stream(url=TRANSCRIPTION_STREAM_WSS_URL, track="inbound_track")
+        stream = start.stream(url=TRANSCRIPTION_STREAM_WSS_URL, track="both_tracks")
         stream.parameter(name="agent_name", value=agent_name or "")
         stream.parameter(name="phone", value=phone or "")
+        stream.parameter(name="enableJcIqMirror", value=True)
         response.append(start)
         logger.info(f"Starting media stream to {TRANSCRIPTION_STREAM_WSS_URL}")
 
@@ -406,7 +407,7 @@ async def amd_bridge(request: Request, campaign_id: str = None, phone: str = Non
     # Restart transcription streaming here so transcript continues after connect.
     if TRANSCRIPTION_STREAM_WSS_URL:
         start = Start()
-        stream = start.stream(url=TRANSCRIPTION_STREAM_WSS_URL, track="inbound_track")
+        stream = start.stream(url=TRANSCRIPTION_STREAM_WSS_URL, track="both_tracks")
         stream.parameter(name="agent_name", value=agent_name or "")
         stream.parameter(name="phone", value=phone or "")
         # Best-effort: include call_sid as a parameter (transcription service may ignore it).
@@ -517,7 +518,7 @@ async def amd_timeout(
     # Restart transcription streaming (redirect can stop previous stream)
     if TRANSCRIPTION_STREAM_WSS_URL:
         start = Start()
-        stream = start.stream(url=TRANSCRIPTION_STREAM_WSS_URL, track="inbound_track")
+        stream = start.stream(url=TRANSCRIPTION_STREAM_WSS_URL, track="both_tracks")
         stream.parameter(name="agent_name", value=agent_name or "")
         stream.parameter(name="phone", value=selected_phone or "")
         stream.parameter(name="call_sid", value=call_sids.get(selected_phone, "") or call_sid or "")
