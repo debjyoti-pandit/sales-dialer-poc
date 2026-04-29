@@ -6,6 +6,16 @@ let currentCall = null;
 let campaign = null;
 let websocket = null;
 let isMuted = false;
+let isOnHold = false;
+let muteBeforeHold = false;
+let holdMusicProcessor = null;
+let holdProcessorAttached = false;
+let holdRemoteAudioPollId = null;
+/** Bumped when hold ends or clears so queued interval ticks cannot re-mute after resume. */
+let holdRemoteSuppressEpoch = 0;
+let remoteAudioRestoreTimeouts = [];
+const HOLD_MUSIC_URL = '/static/hold-music/audiodollar-on-hold-music-371876.mp3';
+let sharedAudioContext = null;
 let currentConnectedPhone = null;
 let agentName = null;
 let selectedCampaignId = null;
@@ -18,7 +28,7 @@ let lastTranscriptLogByPhone = {};
 let lastTranscriptLogAtByPhone = {};
 
 // DOM Elements
-let statusIndicator, statusText, agentInfo, agentNameDisplay, startCampaignBtn, endCampaignBtn, muteBtn;
+let statusIndicator, statusText, agentInfo, agentNameDisplay, startCampaignBtn, endCampaignBtn, muteBtn, holdBtn;
 let contactListContainer, contactList, contactCount, logContainer;
 let callHistoryContainer, callHistoryList, callHistoryCount;
 let dispositionModal, dispositionPhone, dispositionSelect, dispositionNotes;
@@ -87,23 +97,261 @@ window.setAgentName = function() {
 
 // ============== Mute Toggle ==============
 
+function setMuteState(muted, logChange = true) {
+    if (!currentCall) return;
+    isMuted = !!muted;
+    currentCall.mute(isMuted);
+    if (!muteBtn) return;
+    if (isMuted) {
+        muteBtn.textContent = '🔇 Unmute';
+        muteBtn.classList.add('muted');
+        if (logChange) log('Microphone muted');
+    } else {
+        muteBtn.textContent = '🎤 Mute';
+        muteBtn.classList.remove('muted');
+        if (logChange) log('Microphone unmuted');
+    }
+}
+
+class HoldMusicProcessor {
+    constructor(audioUrl) {
+        this.audioUrl = audioUrl;
+        this.audioElement = null;
+        this.destination = null;
+        this.sourceNode = null;
+        this.fallbackOscillator = null;
+        this.fallbackGain = null;
+        if (!sharedAudioContext) {
+            sharedAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        this.audioContext = sharedAudioContext;
+    }
+
+    async startFallbackTone() {
+        this.fallbackOscillator = this.audioContext.createOscillator();
+        this.fallbackGain = this.audioContext.createGain();
+        this.fallbackOscillator.type = 'sine';
+        this.fallbackOscillator.frequency.value = 440; // Simple "on-hold" tone
+        this.fallbackGain.gain.value = 0.03;
+        this.fallbackOscillator.connect(this.fallbackGain);
+        this.fallbackGain.connect(this.destination);
+        this.fallbackOscillator.start();
+    }
+
+    async createProcessedStream(_stream) {
+        if (this.audioContext.state === 'suspended') {
+            await this.audioContext.resume();
+        }
+        this.destination = this.audioContext.createMediaStreamDestination();
+        this.audioElement = new Audio(this.audioUrl);
+        this.audioElement.crossOrigin = 'anonymous';
+        this.audioElement.loop = true;
+        this.audioElement.preload = 'auto';
+        this.audioElement.volume = 0.6;
+
+        try {
+            this.sourceNode = this.audioContext.createMediaElementSource(this.audioElement);
+            this.sourceNode.connect(this.destination);
+            await this.audioElement.play();
+        } catch (err) {
+            console.warn('Hold music URL unavailable, using fallback tone:', err);
+            if (this.sourceNode) {
+                this.sourceNode.disconnect();
+                this.sourceNode = null;
+            }
+            await this.startFallbackTone();
+        }
+        return this.destination.stream;
+    }
+
+    async destroyProcessedStream(_stream) {
+        if (this.fallbackOscillator) {
+            this.fallbackOscillator.stop();
+            this.fallbackOscillator.disconnect();
+            this.fallbackOscillator = null;
+        }
+        if (this.fallbackGain) {
+            this.fallbackGain.disconnect();
+            this.fallbackGain = null;
+        }
+        if (this.audioElement) {
+            this.audioElement.pause();
+            this.audioElement.src = '';
+            this.audioElement = null;
+        }
+        if (this.sourceNode) {
+            this.sourceNode.disconnect();
+            this.sourceNode = null;
+        }
+        if (this.destination) {
+            this.destination.disconnect();
+            this.destination = null;
+        }
+    }
+}
+
+async function attachHoldMusicProcessor() {
+    if (!device || !device.audio) {
+        throw new Error('Device audio is not available');
+    }
+    if (holdProcessorAttached) return;
+    if (!holdMusicProcessor) {
+        holdMusicProcessor = new HoldMusicProcessor(HOLD_MUSIC_URL);
+    }
+    await device.audio.addProcessor(holdMusicProcessor, false);
+    holdProcessorAttached = true;
+}
+
+async function detachHoldMusicProcessor() {
+    if (!device || !device.audio || !holdMusicProcessor || !holdProcessorAttached) return;
+    await device.audio.removeProcessor(holdMusicProcessor, false);
+    holdProcessorAttached = false;
+}
+
+function stopHoldRemoteAudioPoll() {
+    if (holdRemoteAudioPollId !== null) {
+        clearInterval(holdRemoteAudioPollId);
+        holdRemoteAudioPollId = null;
+    }
+}
+
+function cancelRemoteAudioRestoreSchedule() {
+    remoteAudioRestoreTimeouts.forEach((id) => clearTimeout(id));
+    remoteAudioRestoreTimeouts = [];
+}
+
+/**
+ * After resume or processor detach, Twilio may replace the remote MediaStream; retries turn new tracks on.
+ * clearInterval does not cancel callbacks already queued — use holdRemoteSuppressEpoch in applyHoldRemoteSuppression.
+ */
+function scheduleRemoteIncomingAudioRestore() {
+    cancelRemoteAudioRestoreSchedule();
+    const delays = [0, 50, 100, 200, 400, 700, 1200, 2000];
+    delays.forEach((ms) => {
+        const id = setTimeout(() => {
+            if (!currentCall || isOnHold) return;
+            setRemoteIncomingAudioEnabled(true);
+        }, ms);
+        remoteAudioRestoreTimeouts.push(id);
+    });
+}
+
+/** Twilio plays remote party audio via MediaStream tracks; disable them so the agent does not hear the customer while on hold. */
+function setRemoteIncomingAudioEnabled(enabled) {
+    if (!currentCall || typeof currentCall.getRemoteStream !== 'function') return;
+    try {
+        const stream = currentCall.getRemoteStream();
+        if (!stream) return;
+        stream.getAudioTracks().forEach((track) => {
+            track.enabled = enabled;
+        });
+    } catch (e) {
+        console.warn('setRemoteIncomingAudioEnabled:', e);
+    }
+}
+
+/** While on hold: silence remote audio to the agent (outbound is already hold music via HoldMusicProcessor). */
+function applyHoldRemoteSuppression(active) {
+    stopHoldRemoteAudioPoll();
+    cancelRemoteAudioRestoreSchedule();
+    holdRemoteSuppressEpoch++;
+
+    if (!active) {
+        setRemoteIncomingAudioEnabled(true);
+        scheduleRemoteIncomingAudioRestore();
+        return;
+    }
+
+    const epoch = holdRemoteSuppressEpoch;
+    const suppress = () => {
+        if (epoch !== holdRemoteSuppressEpoch) return;
+        if (!isOnHold || !currentCall) {
+            stopHoldRemoteAudioPoll();
+            return;
+        }
+        setRemoteIncomingAudioEnabled(false);
+    };
+    suppress();
+    holdRemoteAudioPollId = setInterval(suppress, 250);
+}
+
+async function clearHoldState() {
+    stopHoldRemoteAudioPoll();
+    cancelRemoteAudioRestoreSchedule();
+    holdRemoteSuppressEpoch++;
+    setRemoteIncomingAudioEnabled(true);
+    if (isOnHold) {
+        try {
+            await detachHoldMusicProcessor();
+        } catch (err) {
+            console.error('Failed to detach hold processor:', err);
+        }
+    }
+    isOnHold = false;
+    updateHoldButtonUI();
+    if (muteBtn) muteBtn.disabled = false;
+    scheduleRemoteIncomingAudioRestore();
+}
+
 window.toggleMute = function() {
     if (!currentCall) {
         log('No active call to mute', 'error');
         return;
     }
-    
-    isMuted = !isMuted;
-    currentCall.mute(isMuted);
-    
-    if (isMuted) {
-        muteBtn.textContent = '🔇 Unmute';
-        muteBtn.classList.add('muted');
-        log('Microphone muted');
+    setMuteState(!isMuted, true);
+};
+
+function updateHoldButtonUI() {
+    if (!holdBtn) return;
+    if (isOnHold) {
+        holdBtn.textContent = '▶ Resume';
+        holdBtn.classList.add('on-hold');
     } else {
-        muteBtn.textContent = '🎤 Mute';
-        muteBtn.classList.remove('muted');
-        log('Microphone unmuted');
+        holdBtn.textContent = '⏸ Hold';
+        holdBtn.classList.remove('on-hold');
+    }
+}
+
+async function setHoldStateOnServer(hold) {
+    if (hold) {
+        await attachHoldMusicProcessor();
+    } else {
+        await detachHoldMusicProcessor();
+    }
+    return { hold };
+}
+
+window.toggleHold = async function() {
+    if (!currentCall || !currentConnectedPhone) {
+        log('No connected customer call to hold', 'error');
+        return;
+    }
+    if (holdBtn) holdBtn.disabled = true;
+    const nextHoldState = !isOnHold;
+    try {
+        await setHoldStateOnServer(nextHoldState);
+        if (nextHoldState) {
+            muteBeforeHold = isMuted;
+            // Keep call media flowing so processor output reaches customer.
+            setMuteState(false, false);
+            if (muteBtn) muteBtn.disabled = true;
+            isOnHold = true;
+            // Block customer audio to agent; outbound is hold music only.
+            applyHoldRemoteSuppression(true);
+            log(`Call with ${currentConnectedPhone} on hold (playing hold music)`, 'info');
+        } else {
+            isOnHold = false;
+            applyHoldRemoteSuppression(false);
+            if (muteBtn) muteBtn.disabled = false;
+            setMuteState(muteBeforeHold, false);
+            log(`Call with ${currentConnectedPhone} resumed`, 'success');
+        }
+        updateHoldButtonUI();
+    } catch (error) {
+        console.error('Hold toggle error:', error);
+        log(`Hold toggle failed: ${error.message}`, 'error');
+    } finally {
+        if (holdBtn) holdBtn.disabled = false;
     }
 };
 
@@ -253,6 +501,9 @@ function handleWebSocketMessage(data) {
             updateContactStatus(data.campaign.contact_status);
             // Show mute button when on call
             if (muteBtn) muteBtn.style.display = 'inline-block';
+            if (holdBtn) holdBtn.style.display = 'inline-block';
+            isOnHold = false;
+            updateHoldButtonUI();
             break;
 
         case 'campaign_updated':
@@ -292,6 +543,9 @@ function handleWebSocketMessage(data) {
             updateStatus('connected', `On call with ${data.phone}`);
             // Show mute button when on call
             if (muteBtn) muteBtn.style.display = 'inline-block';
+            if (holdBtn) holdBtn.style.display = 'inline-block';
+            isOnHold = false;
+            updateHoldButtonUI();
             break;
 
         case 'amd_result':
@@ -305,6 +559,8 @@ function handleWebSocketMessage(data) {
             log(`Call with ${data.phone} ended`, 'info');
             currentConnectedPhone = null;
             if (muteBtn) muteBtn.style.display = 'none';
+            if (holdBtn) holdBtn.style.display = 'none';
+            clearHoldState();
             updateStatus('ready', 'Call ended. Ready for next call.');
             updateContactStatus(data.contact_status);
             showDispositionModal(data.phone);
@@ -509,6 +765,9 @@ function setupCallHandlers(call) {
         const message = currentConnectedPhone ? `On call with ${currentConnectedPhone}` : 'On call';
         updateStatus('on-call', message);
         if (muteBtn) muteBtn.style.display = 'inline-block';
+        if (holdBtn) holdBtn.style.display = 'inline-block';
+        isOnHold = false;
+        updateHoldButtonUI();
     });
 
     call.on('disconnect', function() {
@@ -516,6 +775,8 @@ function setupCallHandlers(call) {
         sendAgentCallState(false);
         currentCall = null;
         if (muteBtn) muteBtn.style.display = 'none';
+        if (holdBtn) holdBtn.style.display = 'none';
+        clearHoldState();
         updateStatus('ready', 'Ready for next call');
     });
 
@@ -523,6 +784,8 @@ function setupCallHandlers(call) {
         log('Call cancelled');
         sendAgentCallState(false);
         currentCall = null;
+        if (holdBtn) holdBtn.style.display = 'none';
+        clearHoldState();
     });
 
     call.on('error', function(error) {
@@ -865,6 +1128,7 @@ window.endCampaign = async function() {
     currentCall = null;
     device = null;
     isMuted = false;
+    await clearHoldState();
     
     startCampaignBtn.disabled = false;
     startCampaignBtn.style.display = 'inline-block';
@@ -874,6 +1138,12 @@ window.endCampaign = async function() {
         muteBtn.style.display = 'none';
         muteBtn.classList.remove('muted');
         muteBtn.textContent = '🎤 Mute';
+    }
+    if (holdBtn) {
+        holdBtn.style.display = 'none';
+        holdBtn.classList.remove('on-hold');
+        holdBtn.textContent = '⏸ Hold';
+        holdBtn.disabled = false;
     }
     
     updateStatus('idle', 'Campaign ended. Ready to start a new one.');
@@ -893,6 +1163,7 @@ document.addEventListener('DOMContentLoaded', function() {
     startCampaignBtn = document.getElementById('startCampaignBtn');
     endCampaignBtn = document.getElementById('endCampaignBtn');
     muteBtn = document.getElementById('muteBtn');
+    holdBtn = document.getElementById('holdBtn');
     contactListContainer = document.getElementById('contactListContainer');
     contactList = document.getElementById('contactList');
     contactCount = document.getElementById('contactCount');
