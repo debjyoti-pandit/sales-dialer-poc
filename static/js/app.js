@@ -10,6 +10,10 @@ let isOnHold = false;
 let muteBeforeHold = false;
 let holdMusicProcessor = null;
 let holdProcessorAttached = false;
+let holdRemoteAudioPollId = null;
+/** Bumped when hold ends or clears so queued interval ticks cannot re-mute after resume. */
+let holdRemoteSuppressEpoch = 0;
+let remoteAudioRestoreTimeouts = [];
 const HOLD_MUSIC_URL = '/static/hold-music/audiodollar-on-hold-music-371876.mp3';
 let sharedAudioContext = null;
 let currentConnectedPhone = null;
@@ -204,7 +208,78 @@ async function detachHoldMusicProcessor() {
     holdProcessorAttached = false;
 }
 
+function stopHoldRemoteAudioPoll() {
+    if (holdRemoteAudioPollId !== null) {
+        clearInterval(holdRemoteAudioPollId);
+        holdRemoteAudioPollId = null;
+    }
+}
+
+function cancelRemoteAudioRestoreSchedule() {
+    remoteAudioRestoreTimeouts.forEach((id) => clearTimeout(id));
+    remoteAudioRestoreTimeouts = [];
+}
+
+/**
+ * After resume or processor detach, Twilio may replace the remote MediaStream; retries turn new tracks on.
+ * clearInterval does not cancel callbacks already queued — use holdRemoteSuppressEpoch in applyHoldRemoteSuppression.
+ */
+function scheduleRemoteIncomingAudioRestore() {
+    cancelRemoteAudioRestoreSchedule();
+    const delays = [0, 50, 100, 200, 400, 700, 1200, 2000];
+    delays.forEach((ms) => {
+        const id = setTimeout(() => {
+            if (!currentCall || isOnHold) return;
+            setRemoteIncomingAudioEnabled(true);
+        }, ms);
+        remoteAudioRestoreTimeouts.push(id);
+    });
+}
+
+/** Twilio plays remote party audio via MediaStream tracks; disable them so the agent does not hear the customer while on hold. */
+function setRemoteIncomingAudioEnabled(enabled) {
+    if (!currentCall || typeof currentCall.getRemoteStream !== 'function') return;
+    try {
+        const stream = currentCall.getRemoteStream();
+        if (!stream) return;
+        stream.getAudioTracks().forEach((track) => {
+            track.enabled = enabled;
+        });
+    } catch (e) {
+        console.warn('setRemoteIncomingAudioEnabled:', e);
+    }
+}
+
+/** While on hold: silence remote audio to the agent (outbound is already hold music via HoldMusicProcessor). */
+function applyHoldRemoteSuppression(active) {
+    stopHoldRemoteAudioPoll();
+    cancelRemoteAudioRestoreSchedule();
+    holdRemoteSuppressEpoch++;
+
+    if (!active) {
+        setRemoteIncomingAudioEnabled(true);
+        scheduleRemoteIncomingAudioRestore();
+        return;
+    }
+
+    const epoch = holdRemoteSuppressEpoch;
+    const suppress = () => {
+        if (epoch !== holdRemoteSuppressEpoch) return;
+        if (!isOnHold || !currentCall) {
+            stopHoldRemoteAudioPoll();
+            return;
+        }
+        setRemoteIncomingAudioEnabled(false);
+    };
+    suppress();
+    holdRemoteAudioPollId = setInterval(suppress, 250);
+}
+
 async function clearHoldState() {
+    stopHoldRemoteAudioPoll();
+    cancelRemoteAudioRestoreSchedule();
+    holdRemoteSuppressEpoch++;
+    setRemoteIncomingAudioEnabled(true);
     if (isOnHold) {
         try {
             await detachHoldMusicProcessor();
@@ -215,6 +290,7 @@ async function clearHoldState() {
     isOnHold = false;
     updateHoldButtonUI();
     if (muteBtn) muteBtn.disabled = false;
+    scheduleRemoteIncomingAudioRestore();
 }
 
 window.toggleMute = function() {
@@ -259,13 +335,17 @@ window.toggleHold = async function() {
             // Keep call media flowing so processor output reaches customer.
             setMuteState(false, false);
             if (muteBtn) muteBtn.disabled = true;
+            isOnHold = true;
+            // Block customer audio to agent; outbound is hold music only.
+            applyHoldRemoteSuppression(true);
             log(`Call with ${currentConnectedPhone} on hold (playing hold music)`, 'info');
         } else {
+            isOnHold = false;
+            applyHoldRemoteSuppression(false);
             if (muteBtn) muteBtn.disabled = false;
             setMuteState(muteBeforeHold, false);
             log(`Call with ${currentConnectedPhone} resumed`, 'success');
         }
-        isOnHold = nextHoldState;
         updateHoldButtonUI();
     } catch (error) {
         console.error('Hold toggle error:', error);
